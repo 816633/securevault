@@ -39,7 +39,7 @@ class StatusPage(Page):
         apply_row = tk.Frame(card.body, bg=T.CARD)
         apply_row.pack(fill="x", pady=(T.px(8), 0))
         self.apply_button = W.FlatButton(
-            apply_row, text="✔  应用模式", kind="primary",
+            apply_row, text="应用模式", kind="primary",
             command=self._apply_mode, font=self.fonts.get("subtitle"),
             padx=22, pady=8)
         self.apply_button.pack(side="left")

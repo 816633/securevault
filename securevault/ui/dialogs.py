@@ -366,10 +366,12 @@ class PasswordDialog(OldStyleDialog):
                  ok_text: str = "确定", confirm_label: str = "",
                  require_length: int = 0, extra_button: str = "",
                  note: str = "", show_forgot: bool = False, validator=None,
-                 on_accept=None, on_forgot=None, on_extra=None):
-        height = 430 if confirm_label else 350
-        super().__init__(parent, title, width=560, height=height)
+                 on_accept=None, on_forgot=None, on_extra=None,
+                 secret: bool = True):
+        height = 400 if confirm_label else 320
+        super().__init__(parent, title, width=520, height=height)
         self._require_length = require_length
+        self.secret = bool(secret)
         self._extra = extra_button
         self._validator = validator
         self._on_accept = on_accept
@@ -381,51 +383,55 @@ class PasswordDialog(OldStyleDialog):
         self._forgot_timer = None
         self._error_label = None
         tk.Label(self.body, text=label, bg=OLD_BG, anchor="w",
-                 justify="left", font=(None, 11)).pack(fill="x")
-        self.entry = tk.Entry(self.body, show="*", relief="flat", bd=1,
-                              highlightthickness=1,
+                 justify="left", font=(None, 12)).pack(fill="x")
+        self.entry = tk.Entry(self.body, show="*" if self.secret else "",
+                              relief="flat", bd=1, highlightthickness=1,
                               highlightbackground="#B4B4B4", highlightcolor=T.ACCENT,
                               bg="#FFFFFF", fg="#1B1B1B",
                               insertbackground="#1B1B1B", width=30,
                               font=(None, 12))
-        self.entry.pack(fill="x", ipady=7, pady=(8, 0))
+        self.entry.pack(fill="x", ipady=6, pady=(8, 0))
         self.confirm_entry = None
         if confirm_label:
             tk.Label(self.body, text=confirm_label, bg=OLD_BG,
-                     anchor="w", font=(None, 11)).pack(fill="x", pady=(18, 0))
+                     anchor="w", font=(None, 12)).pack(fill="x", pady=(14, 0))
             self.confirm_entry = tk.Entry(
-                self.body, show="*", relief="flat", bd=1, highlightthickness=1,
+                self.body, show="*" if self.secret else "",
+                relief="flat", bd=1, highlightthickness=1,
                 highlightbackground="#B4B4B4", highlightcolor=T.ACCENT,
                 bg="#FFFFFF", fg="#1B1B1B", insertbackground="#1B1B1B", width=30,
                 font=(None, 12))
-            self.confirm_entry.pack(fill="x", ipady=7, pady=(8, 0))
+            self.confirm_entry.pack(fill="x", ipady=6, pady=(8, 0))
         self.show_var = tk.BooleanVar(value=False)
-        self.show_check = W.FlatCheck(self.body, "显示密码", False,
-                                      command=self._toggle_show, font=(None, 11),
-                                      bg=OLD_BG, size=20)
-        self.show_check.pack(anchor="w", pady=(16, 0))
+        self.show_check = None
+        if self.secret:
+            # 比正标题（12pt）小一点点
+            self.show_check = W.FlatCheck(self.body, "显示密码", False,
+                                          command=self._toggle_show,
+                                          font=(None, 10), bg=OLD_BG, size=16)
+            self.show_check.pack(anchor="w", pady=(12, 0))
         if note:
             tk.Label(self.body, text=note, bg=OLD_BG, fg="#6B6B6B",
                      anchor="w", justify="left",
                      font=(None, 10),
-                     wraplength=self._width - 60).pack(fill="x", pady=(12, 0))
+                     wraplength=self._width - 60).pack(fill="x", pady=(10, 0))
         row = tk.Frame(self, bg=OLD_BG)
-        row.pack(fill="x", padx=22, pady=(0, 20))
+        row.pack(fill="x", padx=22, pady=(0, 16))
         # 「忘记密码」默认不显示：空密码时 10 秒内连点确定 6 次才会出现 10 秒
         self.forgot_button = W.FlatButton(row, text="忘记密码", kind="default",
-                                          command=self._forgot, font=(None, 11),
-                                          padx=16, pady=9)
+                                          command=self._forgot, font=(None, 10),
+                                          padx=14, pady=6)
         if show_forgot:
             self.forgot_button.pack(side="left")
         W.FlatButton(row, text=ok_text, kind="default", command=self._ok,
-                     font=(None, 11), padx=24, pady=9).pack(side="right")
+                     font=(None, 10), padx=16, pady=6).pack(side="right")
         W.FlatButton(row, text="取消", kind="default", command=self._cancel,
-                     font=(None, 11), padx=24, pady=9).pack(side="right",
-                                                            padx=(0, 10))
+                     font=(None, 10), padx=16, pady=6).pack(side="right",
+                                                             padx=(0, 8))
         if self._extra:
             W.FlatButton(row, text=self._extra, kind="default",
-                         command=self._do_extra, font=(None, 11),
-                         padx=16, pady=9).pack(side="left", padx=(10, 0))
+                         command=self._do_extra, font=(None, 10),
+                         padx=14, pady=6).pack(side="left", padx=(8, 0))
         self.after(80, self.entry.focus_set)
 
     # -- 隐藏的「忘记密码」入口 ------------------------------------------
@@ -447,6 +453,8 @@ class PasswordDialog(OldStyleDialog):
 
     def _bump_empty_click(self) -> bool:
         """空密码点确定：**10 秒内**连点 6 次才显示「忘记密码」按钮。"""
+        if not self.secret:
+            return False
         import time as _time
 
         now = _time.time()
@@ -478,7 +486,9 @@ class PasswordDialog(OldStyleDialog):
             pass
 
     def _toggle_show(self, *_args) -> None:
-        char = "" if getattr(self, "show_check", None) and self.show_check.value else "*"
+        if self.show_check is None:
+            return
+        char = "" if self.show_check.value else "*"
         self.entry.configure(show=char)
         if self.confirm_entry is not None:
             self.confirm_entry.configure(show=char)
@@ -561,27 +571,15 @@ def ask_password_old(parent, title: str = "请输入密码", label: str = "密�
 
 def ask_text_old(parent, title: str, label: str, value: str = "",
                  ok_text: str = "确定", width: int = 300):
-    """老式单行文本输入（恢复码等）。"""
-    dialog = OldStyleDialog(parent, title, width=380, height=170)
-    tk.Label(dialog.body, text=label, bg=OLD_BG, anchor="w", justify="left",
-             wraplength=340).pack(fill="x")
-    entry = tk.Entry(dialog.body, relief="sunken", bd=2, bg="#FFFFFF",
-                     fg="#000000", width=34)
-    entry.insert(0, value)
-    entry.pack(fill="x", pady=(6, 0))
-    result = {"value": None}
+    """单行文本输入（恢复码等）：和密码弹窗同一套**现代扁平**样式。
 
-    def ok() -> None:
-        result["value"] = entry.get()
-        dialog.destroy()
-
-    row = tk.Frame(dialog, bg=OLD_BG)
-    row.pack(fill="x", padx=12, pady=(0, 12))
-    tk.Button(row, text="取消", width=10, relief="raised", bd=2,
-              command=dialog._cancel).pack(side="right")
-    tk.Button(row, text=ok_text, width=10, relief="raised", bd=2,
-              command=ok).pack(side="right", padx=(0, 8))
-    dialog._ok = ok
-    dialog.after(80, entry.focus_set)
+    ``width`` 参数保留是为了兼容旧调用（现在宽度由弹窗统一控制）。
+    """
+    dialog = PasswordDialog(parent, title, label, ok_text, secret=False)
+    if value:
+        dialog.entry.insert(0, value)
+    dialog._ok_handler = dialog._ok
     dialog.reveal(parent)
-    return result["value"]
+    if dialog.result is None:
+        return None
+    return dialog.result.get("value", "")

@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 APP_NAME = "SecureVault"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 APP_TITLE = "SecureVault"
 APP_MUTEX = "Local\\SecureVault_SingleInstance_PY_8F3A21"
 ACTIVATE_MESSAGE = "SecureVaultActivate_8F3A21"

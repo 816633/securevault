@@ -263,6 +263,33 @@ def _dialog_has_text(dialog, needle: str) -> bool:
     return any(needle in text for text in _widget_texts(dialog))
 
 
+def _dialog_style_checks(app, report) -> None:
+    """密码 / 恢复码弹窗的样式细节（按钮大小、复选框大小、现代边框）。"""
+    import tkinter.font as tkfont
+
+    password = D.PasswordDialog(app.root, "样式检查", "密码：", "确定")
+    report.check("密码弹窗输入框是现代扁平样式（不是凹进去的老式框）",
+                 password.entry.cget("relief") == "flat"
+                 and str(password.entry.cget("highlightthickness")) == "1")
+    report.check("「显示密码」复选框比正标题小（16px / 10pt）",
+                 password.show_check._size == 16
+                 and abs(int(tkfont.Font(font=password.show_check.label.cget(
+                     "font")).cget("size"))) == 10,
+                 str(password.show_check._size))
+    ok_font = tkfont.Font(font=password.forgot_button._label.cget("font"))
+    report.check("确定/取消按钮是正常大小（10pt）",
+                 abs(int(ok_font.cget("size"))) == 10, str(ok_font.cget("size")))
+    password._safe_destroy()
+
+    text_dialog = D.PasswordDialog(app.root, "样式检查", "恢复码：", "确定",
+                                   secret=False)
+    report.check("恢复码输入框也是现代扁平样式",
+                 text_dialog.entry.cget("relief") == "flat"
+                 and text_dialog.entry.cget("show") == "")
+    report.check("恢复码弹窗不显示「显示密码」", text_dialog.show_check is None)
+    text_dialog._safe_destroy()
+
+
 def add_rule_via_page(page, rule_type: str, value: str):
     """在排除页加一条规则，返回它的 id。"""
     page.rule_type.set(rule_type)
@@ -333,6 +360,10 @@ def main() -> int:
                      any(page.winfo_ismapped() for page in app._pages),
                      str([page.winfo_ismapped() for page in app._pages]))
         report.check("底部有统一提示条", hasattr(app, "notify_bar"))
+        report.check("「应用模式」按钮上没有多余符号",
+                     app._pages[0].apply_button.text == "应用模式",
+                     app._pages[0].apply_button.text)
+        _dialog_style_checks(app, report)
         report.check("顶栏版本号可点（不会显示 Python 版字样）",
                      "Python" not in button_texts(app._page_holder).__str__()
                      and "Python" not in app.root.title())

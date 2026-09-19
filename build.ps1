@@ -94,7 +94,7 @@ Copy-Item -Path ".build\dist-dir\SecureVault\*" -Destination $target -Recurse -F
 
 Write-Host "== 3/3 附上说明 =="
 $readme = @"
-SecureVault v2.4 —— U 盘自动复制与监控工具
+SecureVault 2.4.1 —— U 盘自动复制与监控工具
 
 用法：把整个 SecureVault 文件夹复制到一个有写权限的位置，双击里面的
       SecureVault.exe 即可开始使用（首次启动会要求设置至少 8 位主密码，

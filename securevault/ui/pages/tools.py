@@ -64,7 +64,7 @@ class ToolsPage(Page):
         row3b = tk.Frame(card.body, bg=T.CARD)
         row3b.pack(fill="x", pady=(T.px(8), 0))
         self.start_desktop_button = W.FlatButton(
-            row3b, text="▶  开始整理复制", kind="primary",
+            row3b, text="开始整理复制", kind="primary",
             command=self._start_desktop_copy, font=self.fonts.get("subtitle"),
             padx=20, pady=7)
         self.start_desktop_button.pack(side="left")
