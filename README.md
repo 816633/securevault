@@ -6,9 +6,9 @@ SecureVault 是一个常驻托盘的桌面小工具，用来监控 U 盘/硬盘�
 
 ## 下载
 
-**[下载 SecureVault 2.4.0（Windows 64 位，便携版）](https://github.com/816633/securevault/releases/latest)**
+**[下载 SecureVault 2.4.1（Windows 64 位，便携版）](https://github.com/816633/securevault/releases/latest)**
 
-下载 `SecureVault-2.4.0-win64-portable.zip` → 解压到任意可写目录 → 双击里面的 `SecureVault.exe`。数据全部写在同目录的 `SecureVaultData\` 里。
+下载 `SecureVault-2.4.1-win64-portable.zip` → 解压到任意可写目录 → 双击里面的 `SecureVault.exe`。数据全部写在同目录的 `SecureVaultData\` 里。
 
 第一次运行会弹出「首次使用」小窗口要求设置主密码（至少 8 位），并显示一次恢复码，请务必保存。详细用法见 [使用手册](docs/使用手册.md)。
 
