@@ -96,10 +96,33 @@ class StatusPage(Page):
         self._loading = False
 
     def _select_mode(self, mode: str) -> None:
+        if self._schedule_locked():
+            self._warn_schedule_locked()
+            return
         self._pending_mode = mode
         self._paint_modes()
         self.mode_hint.set_text("已选择「%s」，点「应用模式」立即生效。" % Mode.label(mode),
                                 T.TEXT_DIM)
+
+    def _schedule_locked(self) -> bool:
+        """定时计划是否正在生效（生效期间不允许改手动模式）。"""
+        try:
+            return bool(self.ctx.engine.state()["schedule_active"])
+        except Exception:
+            return False
+
+    def _schedule_hit(self) -> str:
+        try:
+            return str(self.ctx.engine.state()["schedule_hit"] or "")
+        except Exception:
+            return ""
+
+    def _warn_schedule_locked(self) -> None:
+        hit = self._schedule_hit()
+        text = ("定时切换正在生效（%s），这个时间段里不能更改运行模式；"
+                "要手动切换请先到「定时切换」页停用相关计划。" % hit if hit
+                else "定时切换正在生效，这个时间段里不能更改运行模式。")
+        self.ctx.notify(text, "warn")
 
     def _paint_modes(self) -> None:
         current = self._pending_mode or self.ctx.engine.manual_mode
@@ -108,6 +131,11 @@ class StatusPage(Page):
             button._apply()
 
     def _apply_mode(self) -> None:
+        if self._schedule_locked():
+            self._pending_mode = None
+            self._warn_schedule_locked()
+            self.refresh()
+            return
         mode = self._pending_mode
         if mode is None:
             self.mode_hint.set_text("请先选择一种模式。", T.WARN)
@@ -119,7 +147,15 @@ class StatusPage(Page):
 
     def refresh(self) -> None:
         state = self.ctx.engine.state()
+        active = bool(state["schedule_active"])
+        hit = str(state["schedule_hit"] or "")
         self._paint_modes()
+        # 定时计划生效期间：模式按钮与「应用模式」都锁住（改不了才符合预期）
+        for button in self.mode_buttons.values():
+            button.set_enabled(not active)
+        self.apply_button.set_enabled(not active)
+        if active and self._pending_mode is not None:
+            self._pending_mode = None
         self.applied_label.configure(
             text="当前已应用：%s" % Mode.label(state["manual_mode"]))
         self.status_rows["effective"].configure(
@@ -128,8 +164,14 @@ class StatusPage(Page):
         self.status_rows["manual"].configure(text=Mode.label(state["manual_mode"]))
         self.status_rows["dest"].configure(
             text=state["copy_dest"] or "（未设置，复制模式不会生效）")
-        self.status_rows["schedule"].configure(
-            text="已启用" if state["schedule_on"] else "已停用")
+        if not state["schedule_on"]:
+            schedule_text = "已停用"
+        elif active:
+            schedule_text = "已启用｜正在生效：%s（这个时间段不能更改运行模式）" % (
+                hit or "当前时段")
+        else:
+            schedule_text = "已启用"
+        self.status_rows["schedule"].configure(text=schedule_text)
         self.status_rows["next"].configure(text=state["next_switch"] or "-")
         self.status_rows["event"].configure(text=state["last_event"] or "-")
         stats = state["last_stats"]

@@ -7,10 +7,27 @@ from tkinter import ttk
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import theme as T
+from ..system import touch as TCH
 
 #: 按钮回调里出错时会调用它（由 App 设置，用来写日志 + 底部提示）。
 #: 以前异常被静默吞掉，导致"点了没反应"这种问题很难查。
 BUTTON_ERROR_HOOK = None
+
+#: 触屏拖动滚动期间置位：按钮据此忽略"按下 → 拖动"带来的误点击。
+_DRAG_SCROLL = False
+
+
+def drag_scrolling() -> bool:
+    """当前是否正在用手指拖动页面（按钮的点击判定要跳过这种情况）。"""
+    return _DRAG_SCROLL
+
+
+def bind_touch_keyboard(widget) -> None:
+    """触屏设备上：点输入框自动唤起系统屏幕键盘（没有触摸设备时什么也不做）。"""
+    try:
+        widget.bind("<FocusIn>", lambda _e: TCH.show_keyboard(), add="+")
+    except Exception:
+        pass
 
 
 def report_button_error(exc: BaseException, source: str = "") -> None:
@@ -24,6 +41,22 @@ def report_button_error(exc: BaseException, source: str = "") -> None:
     import traceback
 
     traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
+def _drag_blocked(widget) -> bool:
+    """这些控件自己要用拖动（表格划选 / 滚动条 / 文本框滚动），不做页面滑动。"""
+    blocked = ("Treeview", "TScrollbar", "Scrollbar", "Text", "TCombobox",
+               "Spinbox", "Scale")
+    node = widget
+    while node is not None:
+        try:
+            name = node.winfo_class()
+        except Exception:
+            name = ""
+        if name in blocked:
+            return True
+        node = getattr(node, "master", None)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +219,8 @@ class FlatButton(tk.Frame):
         self._pressed = False
         self._hover = True
         self._apply()
-        if was_pressed and self._command:
+        # 触屏拖动滚动之后松手不算点击（否则滑动页面时会误触发按钮）
+        if was_pressed and self._command and not drag_scrolling():
             try:
                 self._command()
             except Exception as exc:
@@ -213,6 +247,7 @@ class FlatEntry(BorderBox):
         self.entry.pack(fill="both", expand=True, padx=T.px(7), pady=T.px(5))
         self.entry.bind("<FocusIn>", lambda _e: self.set_border(T.ACCENT))
         self.entry.bind("<FocusOut>", lambda _e: self.set_border(T.BORDER))
+        bind_touch_keyboard(self.entry)
 
     def get(self) -> str:
         return self.var.get()
@@ -252,6 +287,8 @@ class FlatText(BorderBox):
         self.text.pack(side="left", fill="both", expand=True)
         self.text.bind("<FocusIn>", lambda _e: self.set_border(T.ACCENT))
         self.text.bind("<FocusOut>", lambda _e: self.set_border(T.BORDER))
+        if not readonly:
+            bind_touch_keyboard(self.text)
 
     def set_text(self, content: str) -> None:
         self.text.configure(state="normal")
@@ -443,7 +480,15 @@ class FlatSelect(BorderBox):
 # ---------------------------------------------------------------------------
 
 class ScrollArea(tk.Frame):
-    """可上下滚动的容器（窗口变矮时页面内容仍然完整可见）。"""
+    """可上下滚动的容器（窗口变矮时页面内容仍然完整可见）。
+
+    * 鼠标滚轮：指针在页面里就能滚；
+    * **触屏 / 触控板：在页面里按住直接上下滑**（手指拖动，内容跟着走）；
+      表格划选、滚动条、文本框这些"自己要用拖动"的控件不参与页面滑动。
+    """
+
+    #: 手指移动超过这么多像素才算"滑动"（避免把点击当成滑动）
+    DRAG_THRESHOLD = 6
 
     def __init__(self, parent, bg: str = T.BG):
         super().__init__(parent, bg=bg, bd=0, highlightthickness=0)
@@ -454,6 +499,7 @@ class ScrollArea(tk.Frame):
         self.canvas.configure(yscrollcommand=self._on_scroll)
         self.canvas.pack(side="left", fill="both", expand=True)
         self._scrollbar_visible = False
+        self._item_height = -1
         self.body = tk.Frame(self.canvas, bg=bg, bd=0, highlightthickness=0)
         self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         self.body.bind("<Configure>", self._on_body_configure)
@@ -462,8 +508,95 @@ class ScrollArea(tk.Frame):
         self.canvas.bind("<Leave>", self._unbind_wheel)
         self.body.bind("<Enter>", self._bind_wheel)
         self.body.bind("<Leave>", self._unbind_wheel)
+        self._drag = None
+        self._bind_drag()
+        self._bind_configure()
 
     # -- 内部 ------------------------------------------------------------
+
+    def _bind_configure(self) -> None:
+        """内容后加进来时也要重新量一次高度（Configure 会冒泡到顶层窗口）。"""
+        try:
+            self.winfo_toplevel().bind("<Configure>", self._on_any_configure,
+                                       add="+")
+        except Exception:
+            pass
+
+    def _on_any_configure(self, event) -> None:
+        if not self._contains(getattr(event, "widget", None)):
+            return
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception:
+            pass
+        self._sync_window_height()
+
+    def _bind_drag(self) -> None:
+        """把拖动事件挂到顶层窗口上：页面里任何位置按下都能滑动。"""
+        try:
+            top = self.winfo_toplevel()
+        except Exception:
+            return
+        for sequence, handler in (("<ButtonPress-1>", self._drag_start),
+                                  ("<B1-Motion>", self._drag_move),
+                                  ("<ButtonRelease-1>", self._drag_end)):
+            try:
+                top.bind(sequence, handler, add="+")
+            except Exception:
+                pass
+
+    def _drag_start(self, event) -> None:
+        global _DRAG_SCROLL
+        _DRAG_SCROLL = False
+        self._drag = None
+        widget = self._widget_under(event.x_root, event.y_root)
+        if widget is None or not self._contains(widget) or _drag_blocked(widget):
+            return
+        self._drag = {"y": event.y_root, "start": event.y_root, "moved": False}
+
+    def _drag_move(self, event) -> None:
+        global _DRAG_SCROLL
+        drag = self._drag
+        if drag is None:
+            return
+        if not drag["moved"]:
+            if abs(event.y_root - drag["start"]) < self.DRAG_THRESHOLD:
+                return
+            drag["moved"] = True
+            _DRAG_SCROLL = True
+        delta = event.y_root - drag["y"]
+        if delta:
+            self._scroll_pixels(delta)
+            drag["y"] = event.y_root
+
+    def _drag_end(self, _event=None) -> None:
+        global _DRAG_SCROLL
+        self._drag = None
+        _DRAG_SCROLL = False
+
+    def _widget_under(self, x_root: int, y_root: int):
+        try:
+            return self.winfo_containing(x_root, y_root)
+        except Exception:
+            return None
+
+    def _contains(self, widget) -> bool:
+        node = widget
+        while node is not None:
+            if node in (self, self.canvas, self.body):
+                return True
+            node = getattr(node, "master", None)
+        return False
+
+    def _scroll_pixels(self, delta: int) -> None:
+        """按像素滚动：手指往下拖（delta > 0）就看到更早的内容。"""
+        try:
+            box = self.canvas.bbox("all")
+            total = max(1, int((box[3] - box[1]) if box else 0))
+            top = float(self.canvas.canvasy(0))
+            self.canvas.yview_moveto(max(0.0, min(1.0, (top - delta) / float(total))))
+        except Exception:
+            pass
 
     def _on_scroll(self, first, last) -> None:
         needed = not (float(first) <= 0.0 and float(last) >= 1.0)
@@ -477,12 +610,28 @@ class ScrollArea(tk.Frame):
 
     def _on_body_configure(self, _event=None) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # 内容变高（例如后加的控件）时要同步 canvas 窗口项的高度，
+        # 否则排在后面的控件分不到位置、会一直不显示。
+        self._sync_window_height()
 
     def _on_canvas_configure(self, event) -> None:
         try:
-            # 让内容宽度跟随窗口；窗口比内容高时把内容拉到满高，避免出现空白带。
-            height = max(event.height, self.body.winfo_reqheight())
-            self.canvas.itemconfigure(self._window, width=event.width, height=height)
+            # 让内容宽度跟随窗口
+            self.canvas.itemconfigure(self._window, width=event.width)
+        except Exception:
+            pass
+        # 窗口比内容高时把内容拉到满高，避免出现空白带
+        self._sync_window_height(event.height)
+
+    def _sync_window_height(self, canvas_height: int = 0) -> None:
+        """内容比窗口高时让 canvas 窗口项跟着内容长（否则后加的控件分不到位置），
+        内容比窗口矮时把高度拉到窗口高，避免下面出现空白带。"""
+        try:
+            canvas_h = int(canvas_height or self.canvas.winfo_height())
+            height = canvas_h if self.body.winfo_reqheight() <= canvas_h else 0
+            if height != self._item_height:
+                self._item_height = height
+                self.canvas.itemconfigure(self._window, height=height)
         except Exception:
             pass
 

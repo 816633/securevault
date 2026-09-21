@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -168,14 +169,19 @@ def configure_ttk(root) -> None:
 
 
 def icon_path() -> Optional[str]:
-    """返回应用图标文件路径。"""
+    """返回应用图标文件路径（源码运行与各种打包布局都找得到）。"""
     candidates = []
     here = os.path.dirname(os.path.abspath(__file__))
     root = os.path.dirname(os.path.dirname(here))
     candidates.append(os.path.join(root, "assets", "securevault.ico"))
-    if getattr(os.sys, "frozen", False):
-        base = os.path.dirname(os.path.abspath(os.sys.executable))
-        candidates.insert(0, os.path.join(base, "assets", "securevault.ico"))
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        # 新版 PyInstaller（onedir）把资源放在 exe 旁边的 _internal\ 里，
+        # 老版直接放在 exe 旁边；sys._MEIPASS 一定指向实际解包目录。
+        for base in (getattr(sys, "_MEIPASS", ""), exe_dir,
+                     os.path.join(exe_dir, "_internal")):
+            if base:
+                candidates.insert(0, os.path.join(base, "assets", "securevault.ico"))
     for path in candidates:
         if os.path.isfile(path):
             return path

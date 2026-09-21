@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import sys
 import time
@@ -289,6 +290,46 @@ def _dialog_style_checks(app, report) -> None:
     report.check("恢复码弹窗不显示「显示密码」", text_dialog.show_check is None)
     text_dialog._safe_destroy()
 
+    # 长提示文字要能换行显示（以前会被窗口右边裁掉）
+    long_hint = D.PasswordDialog(
+        app.root, "样式检查",
+        "请输入恢复码（12 位，XXXX-XXXX-XXXX，不区分大小写）：",
+        "确定", note="恢复码不区分大小写，横线可有可无。", secret=False,
+        show_forgot=True, force_exit="强制退出")
+    long_hint.reveal(app.root)
+    pump(app, 0.3)
+    report.check("长提示文字会自动换行（不会被裁断）",
+                 int(long_hint.label_widget.cget("wraplength")) > 0
+                 and long_hint.winfo_reqheight() <= long_hint._height,
+                 "wrap=%s req=%s height=%s" % (
+                     long_hint.label_widget.cget("wraplength"),
+                     long_hint.winfo_reqheight(), long_hint._height))
+    forgot, force = long_hint.forgot_button, long_hint.force_button
+    report.check("密码弹窗里有「强制退出」按钮",
+                 force is not None and force.text == "强制退出")
+    report.check("「忘记密码」和「强制退出」不会重叠",
+                 forgot.master is force.master
+                 and forgot.winfo_rootx() + forgot.winfo_width()
+                 <= force.winfo_rootx(),
+                 "%s+%s vs %s" % (forgot.winfo_rootx(), forgot.winfo_width(),
+                                  force.winfo_rootx()))
+    long_hint._hide_forgot()
+    pump(app, 0.2)
+    report.check("「忘记密码」隐藏后按钮顺序不乱",
+                 not forgot.winfo_ismapped() and force.winfo_ismapped())
+    long_hint._safe_destroy()
+
+    # 隐藏入口弹出「忘记密码」时也不能和「强制退出」压在一起
+    overlap = D.PasswordDialog(app.root, "样式检查", "请输入密码：", "确定",
+                               force_exit="强制退出")
+    overlap.reveal(app.root)
+    overlap._show_forgot_temporarily()
+    pump(app, 0.3)
+    report.check("「忘记密码」临时出现时也不重叠",
+                 overlap.forgot_button.winfo_rootx() + overlap.forgot_button.winfo_width()
+                 <= overlap.force_button.winfo_rootx())
+    overlap._safe_destroy()
+
 
 def add_rule_via_page(page, rule_type: str, value: str):
     """在排除页加一条规则，返回它的 id。"""
@@ -307,6 +348,379 @@ def _sample_record_for(app):
     return Record(time=now_rfc3339(), event="arrival", action=Action.MONITOR,
                   note="清理测试", device=DeviceInfo(letter="Y:", name="清理盘",
                                                      disk_serial="CLEAN-1"))
+
+
+def drain_queue(app, rounds: int = 40) -> None:
+    """后台线程的结果等不了 1 秒的界面轮询，测试里直接把队列跑干净。"""
+    for _ in range(rounds):
+        try:
+            callback, args = app.ui_queue.get_nowait()
+        except queue.Empty:
+            return
+        callback(*args)
+
+
+def _about_page_checks(app, report) -> None:
+    """关于页：作者 / 版本 / 项目主页，以及检查更新与下载覆盖的完整流程。"""
+    import tkinter.font as tkfont
+
+    from securevault import APP_AUTHOR, APP_VERSION, PROJECT_URL
+    from securevault.system import update as update_mod
+    from securevault.ui.pages.about import plain_notes
+
+    index = app_module.PAGE_TITLES.index("关于")
+    page = app._pages[index]
+    app.tabbar.select(index)
+    pump(app, 0.3)
+    page.refresh()
+    pump(app, 0.2)
+    report.check("关于页的软件名称只有 SecureVault",
+                 page.info_rows["name"].cget("text") == "SecureVault",
+                 page.info_rows["name"].cget("text"))
+    report.check("关于页显示作者", page.info_rows["author"].cget("text") == APP_AUTHOR,
+                 page.info_rows["author"].cget("text"))
+    report.check("当前版本只显示版本号（不带括号说明）",
+                 page.info_rows["version"].cget("text") == "v%s" % APP_VERSION,
+                 page.info_rows["version"].cget("text"))
+    report.check("关于页的项目主页可点（链接样式）",
+                 page.info_rows["home"].cget("text") == PROJECT_URL
+                 and str(page.info_rows["home"].cget("cursor")) == "hand2")
+    texts = button_texts(page)
+    report.check("关于页没有「打开 Releases 页面」按钮",
+                 "打开 Releases 页面" not in texts, str(texts))
+    report.check("关于页没有多余的说明文字",
+                 not any("点击项目地址" in text or "版本号也可以打开项目主页" in text
+                         for text in _widget_texts(page)),
+                 str([t for t in _widget_texts(page) if "点击" in t]))
+    report.check("更新说明会去掉 Markdown 装饰",
+                 plain_notes("# 标题\n\n- **加粗**\n|---|---|") == "标题\n\n· 加粗",
+                 plain_notes("# 标题\n\n- **加粗**\n|---|---|"))
+    report.check("没有检查过时不显示结果区",
+                 not page.result_box.winfo_ismapped()
+                 and not page.download_button.winfo_ismapped())
+
+    def fake_info(source: str) -> dict:
+        asset = "SecureVault-9.9.9-win64-portable.zip"
+        return {
+            "source": source, "source_label": update_mod.source_label(source),
+            "latest": "9.9.9", "tag": "v9.9.9", "name": "9.9.9",
+            "notes": ("# SecureVault 9.9.9\n\nU 盘自动复制与监控工具\n\n"
+                      "## 下载\n\n| 文件 | 说明 |\n|---|---|\n| zip | 便携版 |\n\n"
+                      "## 怎么使用\n\n1. 解压\n2. 双击\n\n"
+                      "## 本版主要改动\n\n- 新增：检查更新\n- 修复：提示被截断\n\n"
+                      "## 运行环境\n\n- Windows 10 / 11\n"),
+            "published": "2026-09-20", "asset": asset, "size": 15 * 1024 * 1024,
+            "newer": True,
+            "url": update_mod.download_url("9.9.9", asset, source),
+            "official_url": update_mod.release_url("9.9.9", asset),
+            "page": update_mod.RELEASES_PAGE,
+        }
+
+    asked = []
+    original_check = update_mod.check_for_update
+    update_mod.check_for_update = lambda source, timeout=30: (
+        asked.append(source), fake_info(source))[1]
+    try:
+        page.check_now()
+        pump(app, 0.4)
+        drain_queue(app)
+        pump(app, 0.2)
+    finally:
+        update_mod.check_for_update = original_check
+    report.check("检查更新固定走官方源",
+                 asked == [update_mod.CHECK_SOURCE] and asked == ["github"], str(asked))
+    report.check("检查更新后显示最新版本号",
+                 "9.9.9" in page.latest_label.cget("text"),
+                 page.latest_label.cget("text"))
+    report.check("检查更新后结果区才出现",
+                 page.result_box.winfo_ismapped()
+                 and page.download_button.winfo_ismapped(),
+                 "结果区=%s 按钮=%s 页面可见=%s"
+                 % (page.result_box.winfo_ismapped(),
+                    page.download_button.winfo_ismapped(), page.winfo_ismapped()))
+    notes_text = page.notes.get()
+    report.check("更新内容只保留「本版主要改动」",
+                 "新增：检查更新" in notes_text and "怎么使用" not in notes_text
+                 and "运行环境" not in notes_text, notes_text[:60])
+    notes_font = tkfont.Font(font=page.notes.text.cget("font"))
+    report.check("更新内容用正常字号（不是小号等宽）",
+                 abs(int(notes_font.cget("size"))) >= 9, str(notes_font.cget("size")))
+    report.check("发现新版本后「下载并覆盖」可用", page.download_button._enabled)
+    report.check("检查结果里有发布时间与包大小",
+                 "15.00 MB" in page.detail_label.cget("text")
+                 and "2026-09-20" in page.detail_label.cget("text"),
+                 page.detail_label.cget("text"))
+    sources = [text for _key, text in page.source._choices]
+    report.check("下载源仍可选官方源与两个 gh-proxy 加速源",
+                 len(sources) == 3 and "官方源" in sources[0]
+                 and "推荐" in sources[1] and "全球" in sources[2], str(sources))
+
+    # 源码运行时不写程序目录（避免把源码目录覆盖成程序文件）
+    blocked = []
+    original_download_guard = update_mod.download
+    update_mod.download = lambda *a, **k: blocked.append(True)
+    try:
+        page.download_and_apply()
+        pump(app, 0.2)
+    finally:
+        update_mod.download = original_download_guard
+    report.check("源码运行时不执行覆盖更新",
+                 not blocked and "源码运行" in app.notify_bar.label.cget("text"),
+                 app.notify_bar.label.cget("text"))
+
+    # 下载 → 解包 → 覆盖 → 重启（联网部分用替身，流程是真的）
+    calls = []
+    restarted = []
+    original_download = update_mod.download
+    original_stage = update_mod.stage
+    original_apply = update_mod.apply_staging
+    original_restart = app.restart_now
+    update_mod.download = lambda url, dest, progress=None, timeout=30: (
+        calls.append("下载"), dest)[1]
+    update_mod.stage = lambda zip_path, work_dir, progress=None: (
+        calls.append("解包"), (work_dir, 10))[1]
+    update_mod.apply_staging = lambda staging, target, progress=None: (
+        calls.append("覆盖"),
+        {"total": 10, "replaced": 9, "added": 1, "failed": []})[1]
+    app.restart_now = lambda: restarted.append(True)
+    had_frozen = hasattr(sys, "frozen")
+    sys.frozen = True                      # 让代码以为运行在打包版里
+    try:
+        page.download_and_apply()
+        pump(app, 0.4)
+        drain_queue(app)
+        pump(app, 0.2)
+    finally:
+        update_mod.download = original_download
+        update_mod.stage = original_stage
+        update_mod.apply_staging = original_apply
+        app.restart_now = original_restart
+        if not had_frozen:
+            del sys.frozen
+    report.check("「下载并覆盖」按下载 → 解包 → 覆盖执行",
+                 calls == ["下载", "解包", "覆盖"], str(calls))
+    report.check("覆盖完成后会询问并重启程序", restarted == [True], str(restarted))
+    report.check("覆盖结果会显示在页面上",
+                 "覆盖 9" in page.progress_label.cget("text"),
+                 page.progress_label.cget("text"))
+
+    # 检查失败也要有明确提示（不能点了没反应）
+    def boom(source, timeout=30):
+        raise update_mod.UpdateError("连接失败：测试用错误")
+
+    update_mod.check_for_update = boom
+    try:
+        page.check_now()
+        pump(app, 0.4)
+        drain_queue(app)
+        pump(app, 0.2)
+    finally:
+        update_mod.check_for_update = original_check
+    report.check("检查更新失败时提示原因",
+                 "测试用错误" in app.notify_bar.label.cget("text"),
+                 app.notify_bar.label.cget("text"))
+
+
+def _settings_forgot_checks(app, report) -> None:
+    """设置页的密码弹窗也要有完整的「忘记密码」逻辑。"""
+    original_ask = D.ask_password_old
+    original_reset = app.reset_with_recovery
+    original_message = D.message
+    seen = []
+    resets = []
+
+    def fake_ask(*args, **kwargs):
+        seen.append(kwargs)
+        return {"forgot": True}
+
+    app.reset_with_recovery = lambda open_panel=True: (
+        resets.append(open_panel), True)[1]
+    app_module.D.message = D.message = lambda *a, **k: 0
+    try:
+        D.ask_password_old = fake_ask
+        app.change_password()
+        app.rotate_recovery()
+    finally:
+        D.ask_password_old = original_ask
+        app.reset_with_recovery = original_reset
+        app_module.D.message = D.message = original_message
+    report.check("设置里的密码弹窗带「忘记密码」入口",
+                 len(seen) == 2 and all(item.get("show_forgot") for item in seen),
+                 str([item.get("show_forgot") for item in seen]))
+    report.check("改密码 / 重新生成恢复码都能走恢复码重置",
+                 resets == [False, False], str(resets))
+
+
+def _schedule_lock_checks(app, report) -> None:
+    """定时计划生效的时间段里，主页不允许改运行模式。"""
+    from securevault.core.model import ScheduleSlot
+
+    status_page = app._pages[0]
+    app.tabbar.select(0)
+    pump(app, 0.2)
+    app.engine.set_manual_mode(Mode.MONITOR)
+    slot = ScheduleSlot(start="00:00", end="23:59", mode=Mode.COPY, days=0x7F,
+                        remark="E2E 生效中")
+    slot.id = app.store.add_schedule(slot)
+    app.engine.reload()
+    pump(app, 0.2)
+    report.check("引擎能识别「正在生效的时间段」",
+                 app.engine.schedule_active and app.engine.schedule_hit,
+                 "%s / %s" % (app.engine.schedule_active, app.engine.schedule_hit))
+
+    status_page.refresh()
+    pump(app, 0.2)
+    notices = []
+    original_notify = app.notify
+    app.notify = lambda text, level="info", timeout=0: (
+        notices.append(text), original_notify(text, level, timeout))[1]
+    try:
+        status_page._select_mode(Mode.OFF)
+        status_page._apply_mode()
+    finally:
+        app.notify = original_notify
+    pump(app, 0.2)
+    report.check("定时生效期间不会改掉手动模式",
+                 app.engine.manual_mode == Mode.MONITOR, app.engine.manual_mode)
+    report.check("定时生效期间模式按钮被禁用",
+                 not status_page.mode_buttons[Mode.OFF]._enabled
+                 and not status_page.apply_button._enabled)
+    report.check("状态页写明定时正在生效",
+                 "正在生效" in status_page.status_rows["schedule"].cget("text"),
+                 status_page.status_rows["schedule"].cget("text"))
+    report.check("生效期间点模式会有明确提示",
+                 any("不能更改运行模式" in text for text in notices), str(notices[-2:]))
+
+    app.store.delete_schedule(slot.id)
+    app.engine.reload()
+    status_page.refresh()
+    pump(app, 0.2)
+    report.check("计划停用后又能改模式",
+                 status_page.mode_buttons[Mode.OFF]._enabled
+                 and not app.engine.schedule_active)
+
+
+def _force_exit_checks(app, report) -> None:
+    """「强制退出」：确认后退出程序并关掉开机自启；取消则什么都不做。"""
+    from securevault.system import autostart
+
+    original_quit = app.quit
+    original_message = D.message
+    original_disable = autostart.disable
+    original_ask = D.ask_password_old
+    quit_called = []
+    disabled = []
+    captured = {}
+
+    def fake_ask(*args, **kwargs):
+        captured.update(kwargs)
+        return None                     # 相当于点了取消
+
+    D.ask_password_old = fake_ask
+    app_module.D.ask_password_old = fake_ask
+    try:
+        app.request_exit()
+    finally:
+        D.ask_password_old = original_ask
+        app_module.D.ask_password_old = original_ask
+    report.check("托盘「退出」的密码框里才有「强制退出」",
+                 captured.get("force_exit") == "强制退出"
+                 and callable(captured.get("on_force_exit")), str(sorted(captured)))
+
+    app.quit = lambda: quit_called.append(True)
+    autostart.disable = lambda: (disabled.append(True), True)[1]
+    try:
+        app_module.D.message = D.message = lambda *a, **k: 1     # 点「取消」
+        app.force_exit_dialog()
+        report.check("强制退出点「取消」不会退出程序", not quit_called and not disabled)
+        app_module.D.message = D.message = lambda *a, **k: 0     # 点「强制退出」
+        app.force_exit_dialog()
+    finally:
+        app.quit = original_quit
+        autostart.disable = original_disable
+        app_module.D.message = D.message = original_message
+    report.check("强制退出确认后会退出程序", quit_called == [True], str(quit_called))
+    report.check("强制退出会关掉开机自启", disabled == [True], str(disabled))
+
+    probe = D.PasswordDialog(app.root, "退出程序", "退出前请输入密码：", "退出",
+                             force_exit="强制退出",
+                             on_force_exit=lambda: quit_called.append("callback"))
+    probe._force_quit()
+    report.check("密码弹窗里的「强制退出」按钮会回调确认流程",
+                 quit_called[-1] == "callback", str(quit_called))
+
+
+def _touch_checks(app, report) -> None:
+    """触屏：点输入框唤起屏幕键盘、手指拖动可以直接滑页面。"""
+    from securevault.system import touch as touchmod
+    from securevault.ui import widgets as W
+
+    index = app_module.PAGE_TITLES.index("设置")
+    page = app._pages[index]
+    app.tabbar.select(index)
+    pump(app, 0.3)
+
+    called = []
+    original_keyboard = touchmod.show_keyboard
+    touchmod.show_keyboard = lambda force=False: (called.append(True), True)[1]
+    try:
+        page.copy_dest.entry.event_generate("<FocusIn>")
+        pump(app, 0.2)
+        dialog = D.PasswordDialog(app.root, "触屏检查", "请输入密码：", "确定")
+        dialog.reveal(app.root)
+        pump(app, 0.3)
+        dialog.entry.event_generate("<FocusIn>")
+        pump(app, 0.2)
+        dialog._safe_destroy()
+    finally:
+        touchmod.show_keyboard = original_keyboard
+    report.check("点输入框会请求屏幕键盘（面板与密码弹窗都算）",
+                 len(called) >= 2, str(len(called)))
+
+    area = None
+    for child in page.winfo_children():
+        if isinstance(child, W.ScrollArea):
+            area = child
+    if area is None:
+        report.check("页面有可滑动容器", False)
+        return
+    report.check("页面用可滑动容器装内容", area is not None)
+
+    class _Event(object):
+        x_root = 100
+        y_root = 100
+
+    area._widget_under = lambda x, y: area.canvas
+    area._contains = lambda widget: True
+    event = _Event()
+    area._drag_start(event)
+    event.y_root = 140
+    area._drag_move(event)
+    report.check("手指在页面里拖动会进入滑动状态", W.drag_scrolling())
+
+    fired = []
+    button = W.FlatButton(page, text="拖动测试", kind="default",
+                          command=lambda: fired.append(1))
+    button._on_press()
+    button._on_release()
+    report.check("滑动之后松手不会误触发按钮", not fired, str(fired))
+    area._drag_end()
+    button._on_press()
+    button._on_release()
+    report.check("正常点击仍然触发按钮", fired == [1], str(fired))
+    button.destroy()
+
+    box = area.canvas.bbox("all") or (0, 0, 0, 0)
+    overflow = (box[3] - box[1]) > area.canvas.winfo_height()
+    before = area.canvas.yview()[0]
+    area._scroll_pixels(-60)
+    pump(app, 0.1)
+    after = area.canvas.yview()[0]
+    report.check("滑动按像素滚动页面", (after > before) if overflow else True,
+                 "overflow=%s %s→%s" % (overflow, before, after))
+    report.check("表格里拖动优先划选（不带动整页）",
+                 W._drag_blocked(app._pages[1].tree)
+                 and not W._drag_blocked(area.canvas))
 
 
 def main() -> int:
@@ -396,16 +810,21 @@ def main() -> int:
                      app._page_holder is panel_first
                      and toplevel_count(app.root) == 0)
 
+        # 关于页：作者 / 版本 / 项目主页 / 检查更新
+        _about_page_checks(app, report)
+        _settings_forgot_checks(app, report)
+
         # 状态页：切换模式
         status_page = app._pages[0]
         app.tabbar.select(0)
-        pump(app, 0.2)
+        pump(app, 0.4)
+        drain_queue(app)               # 先让设备枚举的结果落地，别盖住后面的操作反馈
         status_page._select_mode(Mode.COPY)
         status_page._apply_mode()
-        pump(app, 0.2)
         report.check("操作反馈显示在底部提示条",
                      "复制模式" in app.notify_bar.label.cget("text"),
                      app.notify_bar.label.cget("text"))
+        pump(app, 0.2)
         report.check("状态页可以切换为复制模式",
                      app.engine.manual_mode == Mode.COPY
                      and app.engine.effective_mode == Mode.COPY,
@@ -426,6 +845,9 @@ def main() -> int:
         status_page._select_mode(Mode.COPY)
         status_page._apply_mode()
         pump(app, 0.2)
+
+        # 定时计划生效期间不允许改运行模式
+        _schedule_lock_checks(app, report)
 
         # 排除名单页：新增规则与名单
         exclude_page = app._pages[2]
@@ -544,6 +966,12 @@ def main() -> int:
         report.check("日志页切换文件后仍有内容",
                      len(logs_page.preview.get()) > 0)
 
+        # 触屏：屏幕键盘与手指滑动
+        _touch_checks(app, report)
+
+        # 强制退出：确认后退出程序 + 关掉开机自启
+        _force_exit_checks(app, report)
+
         # 上锁 -> 窗口隐藏 -> 再次打开需要密码
         app.lock_now()
         pump(app, 0.3)
@@ -601,6 +1029,8 @@ def main() -> int:
         report.check("超过 10 秒的点击会重新计数（不会显示「忘记密码」）",
                      "忘记密码" not in _widget_texts(lock_view))
         report.check("解锁窗口里有「显示密码」勾选框", "显示密码" in texts)
+        report.check("解锁窗口里没有「强制退出」（只在托盘「退出」时才有）",
+                     "强制退出" not in texts, str(texts))
         report.check("解锁窗口里不出现软件名",
                      not any("SecureVault" in t for t in texts))
         lock_view.entry.delete(0, "end")

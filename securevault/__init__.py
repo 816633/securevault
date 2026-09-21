@@ -18,9 +18,15 @@
 from __future__ import annotations
 
 APP_NAME = "SecureVault"
-APP_VERSION = "2.4.1"
+APP_VERSION = "2.4.2"
 APP_TITLE = "SecureVault"
 APP_MUTEX = "Local\\SecureVault_SingleInstance_PY_8F3A21"
 ACTIVATE_MESSAGE = "SecureVaultActivate_8F3A21"
 
-__all__ = ["APP_NAME", "APP_VERSION", "APP_TITLE", "APP_MUTEX", "ACTIVATE_MESSAGE"]
+#: 作者与项目地址（界面「关于」页会显示，版本检查也用它拼地址）
+APP_AUTHOR = "816633"
+REPO_SLUG = "816633/securevault"
+PROJECT_URL = "https://github.com/816633/securevault"
+
+__all__ = ["APP_NAME", "APP_VERSION", "APP_TITLE", "APP_MUTEX", "ACTIVATE_MESSAGE",
+           "APP_AUTHOR", "REPO_SLUG", "PROJECT_URL"]

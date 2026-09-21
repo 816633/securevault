@@ -367,7 +367,7 @@ class PasswordDialog(OldStyleDialog):
                  require_length: int = 0, extra_button: str = "",
                  note: str = "", show_forgot: bool = False, validator=None,
                  on_accept=None, on_forgot=None, on_extra=None,
-                 secret: bool = True):
+                 secret: bool = True, force_exit: str = "", on_force_exit=None):
         height = 400 if confirm_label else 320
         super().__init__(parent, title, width=520, height=height)
         self._require_length = require_length
@@ -377,13 +377,18 @@ class PasswordDialog(OldStyleDialog):
         self._on_accept = on_accept
         self._on_forgot = on_forgot
         self._on_extra = on_extra
+        self._on_force_exit = on_force_exit
         self.forgot_visible = show_forgot
         self._empty_clicks = 0
         self._click_window_start = 0.0
         self._forgot_timer = None
         self._error_label = None
-        tk.Label(self.body, text=label, bg=OLD_BG, anchor="w",
-                 justify="left", font=(None, 12)).pack(fill="x")
+        # 提示文字要能换行：以前长一点的说明会被窗口右边裁掉（用户反馈过）
+        wrap = max(200, self._width - 60)
+        self.label_widget = tk.Label(self.body, text=label, bg=OLD_BG, anchor="w",
+                                     justify="left", wraplength=wrap,
+                                     font=(None, 12))
+        self.label_widget.pack(fill="x")
         self.entry = tk.Entry(self.body, show="*" if self.secret else "",
                               relief="flat", bd=1, highlightthickness=1,
                               highlightbackground="#B4B4B4", highlightcolor=T.ACCENT,
@@ -391,10 +396,12 @@ class PasswordDialog(OldStyleDialog):
                               insertbackground="#1B1B1B", width=30,
                               font=(None, 12))
         self.entry.pack(fill="x", ipady=6, pady=(8, 0))
+        W.bind_touch_keyboard(self.entry)
         self.confirm_entry = None
         if confirm_label:
             tk.Label(self.body, text=confirm_label, bg=OLD_BG,
-                     anchor="w", font=(None, 12)).pack(fill="x", pady=(14, 0))
+                     anchor="w", justify="left", wraplength=wrap,
+                     font=(None, 12)).pack(fill="x", pady=(14, 0))
             self.confirm_entry = tk.Entry(
                 self.body, show="*" if self.secret else "",
                 relief="flat", bd=1, highlightthickness=1,
@@ -402,6 +409,7 @@ class PasswordDialog(OldStyleDialog):
                 bg="#FFFFFF", fg="#1B1B1B", insertbackground="#1B1B1B", width=30,
                 font=(None, 12))
             self.confirm_entry.pack(fill="x", ipady=6, pady=(8, 0))
+            W.bind_touch_keyboard(self.confirm_entry)
         self.show_var = tk.BooleanVar(value=False)
         self.show_check = None
         if self.secret:
@@ -417,22 +425,63 @@ class PasswordDialog(OldStyleDialog):
                      wraplength=self._width - 60).pack(fill="x", pady=(10, 0))
         row = tk.Frame(self, bg=OLD_BG)
         row.pack(fill="x", padx=22, pady=(0, 16))
+        # 左侧按钮集中放在一列里，按顺序排开（不是叠放）：
+        # 「忘记密码」出现 / 消失都不会和「强制退出」「额外按钮」重叠。
+        self.left_box = tk.Frame(row, bg=OLD_BG)
+        self.left_box.pack(side="left")
         # 「忘记密码」默认不显示：空密码时 10 秒内连点确定 6 次才会出现 10 秒
-        self.forgot_button = W.FlatButton(row, text="忘记密码", kind="default",
+        self.forgot_button = W.FlatButton(self.left_box, text="忘记密码", kind="default",
                                           command=self._forgot, font=(None, 10),
                                           padx=14, pady=6)
-        if show_forgot:
-            self.forgot_button.pack(side="left")
+        self.force_button = None
+        if force_exit:
+            self.force_button = W.FlatButton(
+                self.left_box, text=force_exit, kind="danger",
+                command=self._force_quit, font=(None, 10), padx=14, pady=6)
+        self.extra_button = None
+        if self._extra:
+            self.extra_button = W.FlatButton(
+                self.left_box, text=self._extra, kind="default",
+                command=self._do_extra, font=(None, 10), padx=14, pady=6)
+        self._layout_left(show_forgot)
         W.FlatButton(row, text=ok_text, kind="default", command=self._ok,
                      font=(None, 10), padx=16, pady=6).pack(side="right")
         W.FlatButton(row, text="取消", kind="default", command=self._cancel,
                      font=(None, 10), padx=16, pady=6).pack(side="right",
                                                              padx=(0, 8))
-        if self._extra:
-            W.FlatButton(row, text=self._extra, kind="default",
-                         command=self._do_extra, font=(None, 10),
-                         padx=14, pady=6).pack(side="left", padx=(8, 0))
         self.after(80, self.entry.focus_set)
+
+    # -- 左侧按钮的排布 --------------------------------------------------
+
+    def _layout_left(self, show_forgot: bool) -> None:
+        """按 [忘记密码] [强制退出] [额外按钮] 的顺序重新排一遍左侧按钮。"""
+        for widget in (self.forgot_button, self.force_button, self.extra_button):
+            if widget is not None:
+                try:
+                    widget.pack_forget()
+                except Exception:
+                    pass
+        gap = T.px(8)
+        first = True
+        if show_forgot:
+            self.forgot_button.pack(side="left")
+            first = False
+        for widget in (self.force_button, self.extra_button):
+            if widget is None:
+                continue
+            widget.pack(side="left", padx=(0 if first else gap, 0))
+            first = False
+
+    def reveal(self, parent=None) -> None:
+        """提示文字换行后内容会变高，这里按实际需要的高度显示（不再裁掉）。"""
+        try:
+            self.update_idletasks()
+            needed = self.winfo_reqheight()
+            if needed > self._height:
+                self._height = needed
+        except Exception:
+            pass
+        super().reveal(parent)
 
     # -- 隐藏的「忘记密码」入口 ------------------------------------------
 
@@ -470,7 +519,7 @@ class PasswordDialog(OldStyleDialog):
         return False
 
     def _show_forgot_temporarily(self) -> None:
-        self.forgot_button.pack(side="left")
+        self._layout_left(True)
         if self._forgot_timer is not None:
             try:
                 self.after_cancel(self._forgot_timer)
@@ -480,10 +529,16 @@ class PasswordDialog(OldStyleDialog):
 
     def _hide_forgot(self) -> None:
         self._forgot_timer = None
-        try:
-            self.forgot_button.pack_forget()
-        except Exception:
-            pass
+        self._layout_left(False)
+
+    def _force_quit(self) -> None:
+        self.result = {"force": True, "value": self.entry.get()}
+        if self._on_force_exit:
+            try:
+                self._on_force_exit()
+            except Exception:
+                pass
+        self._safe_destroy()
 
     def _toggle_show(self, *_args) -> None:
         if self.show_check is None:
@@ -505,7 +560,8 @@ class PasswordDialog(OldStyleDialog):
     def _ok(self) -> None:
         value = self.entry.get()
         if not value:
-            self._bump_empty_click()
+            if not self._bump_empty_click():
+                self._show_error("请先输入内容。")
             return
         if self._require_length and len(value) < self._require_length:
             message(self, "提示", "至少需要 %d 位。" % self._require_length,
@@ -550,18 +606,23 @@ def ask_password_old(parent, title: str = "请输入密码", label: str = "密�
                      ok_text: str = "确定", confirm_label: str = "",
                      require_length: int = 0, extra_button: str = "",
                      note: str = "", show_forgot: bool = False, validator=None,
-                     on_accept=None, on_forgot=None, on_extra=None):
+                     on_accept=None, on_forgot=None, on_extra=None,
+                     force_exit: str = "", on_force_exit=None):
     """老式密码输入框。
 
     返回：普通字符串；``{"extra": True, ...}`` 表示点了额外按钮；
-    ``{"forgot": True}`` 表示（隐藏入口）点了「忘记密码」；取消返回 None。
+    ``{"forgot": True}`` 表示（隐藏入口）点了「忘记密码」；
+    ``{"force": True}`` 表示点了「强制退出」；取消返回 None。
     """
     dialog = PasswordDialog(parent, title, label, ok_text, confirm_label,
                             require_length, extra_button, note, show_forgot,
-                            validator, on_accept, on_forgot, on_extra)
+                            validator, on_accept, on_forgot, on_extra,
+                            force_exit=force_exit, on_force_exit=on_force_exit)
     dialog.reveal(parent)
     if dialog.result is None:
         return None
+    if dialog.result.get("force"):
+        return {"force": True}
     if dialog.result.get("forgot"):
         return {"forgot": True}
     if dialog.result.get("extra"):
@@ -570,12 +631,12 @@ def ask_password_old(parent, title: str = "请输入密码", label: str = "密�
 
 
 def ask_text_old(parent, title: str, label: str, value: str = "",
-                 ok_text: str = "确定", width: int = 300):
+                 ok_text: str = "确定", width: int = 300, note: str = ""):
     """单行文本输入（恢复码等）：和密码弹窗同一套**现代扁平**样式。
 
     ``width`` 参数保留是为了兼容旧调用（现在宽度由弹窗统一控制）。
     """
-    dialog = PasswordDialog(parent, title, label, ok_text, secret=False)
+    dialog = PasswordDialog(parent, title, label, ok_text, note=note, secret=False)
     if value:
         dialog.entry.insert(0, value)
     dialog._ok_handler = dialog._ok

@@ -425,6 +425,8 @@ class Settings:
     record_removal: bool = True
     minimize_to_tray: bool = True
     background_monitor: bool = True
+    #: 触屏设备上点输入框时自动弹出屏幕键盘（没有触摸设备的电脑上无影响）
+    touch_keyboard: bool = True
     confirm_before_copy: bool = False
     #: 复制前检查"目标文件是否还在"：目标被误删时按下面的策略处理
     verify_dest_exists: bool = True

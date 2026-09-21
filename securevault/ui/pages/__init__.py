@@ -1,4 +1,4 @@
-"""七个标签页。"""
+"""八个标签页。"""
 
 from .status import StatusPage
 from .records import RecordsPage
@@ -7,6 +7,7 @@ from .schedule import SchedulePage
 from .tools import ToolsPage
 from .settings import SettingsPage
 from .logs import LogsPage
+from .about import AboutPage
 
 __all__ = ["StatusPage", "RecordsPage", "ExcludePage", "SchedulePage",
-           "ToolsPage", "SettingsPage", "LogsPage"]
+           "ToolsPage", "SettingsPage", "LogsPage", "AboutPage"]

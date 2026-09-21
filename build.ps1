@@ -1,4 +1,4 @@
-# 打包脚本：生成 dist\SecureVault\SecureVault.exe（正式交付）
+﻿# 打包脚本：生成 dist\SecureVault\SecureVault.exe（正式交付）
 #
 # 用法：  .\build.ps1
 #
@@ -92,25 +92,6 @@ if (Test-Path $target) { Remove-Item -LiteralPath $target -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 Copy-Item -Path ".build\dist-dir\SecureVault\*" -Destination $target -Recurse -Force
 
-Write-Host "== 3/3 附上说明 =="
-$readme = @"
-SecureVault 2.4.1 —— U 盘自动复制与监控工具
-
-用法：把整个 SecureVault 文件夹复制到一个有写权限的位置，双击里面的
-      SecureVault.exe 即可开始使用（首次启动会要求设置至少 8 位主密码，
-      并显示一次恢复码，请务必保存）。
-
-* SecureVault.exe        程序本体
-* 其它 dll / tcl / tk 等   程序运行需要的库（不要删除、不要单独把 exe 拿走）
-
-数据全部写在 SecureVaultData 子文件夹里，不会写到 C 盘其它位置。
-关闭窗口 = 收进托盘并上锁；托盘图标右键「退出」才是彻底退出程序。
-解锁/首次设置是老式小弹窗（带"显示密码"），解锁之前不会显示软件名；点标题条上的版本号可以打开项目主页
-https://github.com/816633/securevault 。
-
-详细说明见上级目录的 README.md 与 docs\使用手册.md。
-"@
-Set-Content -LiteralPath (Join-Path $target "请先读我.txt") -Value $readme -Encoding UTF8
-
+Write-Host "== 3/3 完成 =="
 Get-ChildItem .\dist | Select-Object Name, Length | Format-Table -AutoSize
 Write-Host "打包完成。"

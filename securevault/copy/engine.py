@@ -41,6 +41,9 @@ class Engine:
         self._schedule: List[ScheduleSlot] = []
         self._manual_mode = Mode.MONITOR
         self._effective_mode = Mode.MONITOR
+        #: 定时计划命中的时间段（命中期间不允许改手动模式）
+        self._schedule_active = False
+        self._schedule_hit = ""
         self._copying = False
         self._last_event = ""
         self._last_result = ""
@@ -137,6 +140,18 @@ class Engine:
             return self._copying
 
     @property
+    def schedule_active(self) -> bool:
+        """当前是否处于定时计划的生效时间段。"""
+        with self._lock:
+            return self._schedule_active
+
+    @property
+    def schedule_hit(self) -> str:
+        """正在生效的时间段（``22:00-06:00``）；没命中时是空串。"""
+        with self._lock:
+            return self._schedule_hit
+
+    @property
     def aliases(self) -> List[Alias]:
         with self._lock:
             return list(self._aliases)
@@ -153,6 +168,8 @@ class Engine:
                 "last_stats": self._last_stats,
                 "last_copy_at": self._last_copy_at,
                 "schedule_on": self._settings.schedule_enable,
+                "schedule_active": self._schedule_active,
+                "schedule_hit": self._schedule_hit,
                 "next_switch": self._next_switch(),
                 "rules": len(self._exclude),
                 "aliases": len(self._aliases),
@@ -192,6 +209,8 @@ class Engine:
                         break
             changed = mode != self._effective_mode
             self._effective_mode = mode
+            self._schedule_active = bool(hit)
+            self._schedule_hit = hit
         if changed:
             if hit:
                 self._log("info", "定时计划命中（%s），当前模式切换为：%s"

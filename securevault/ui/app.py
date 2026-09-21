@@ -12,18 +12,18 @@ import webbrowser
 from tkinter import messagebox
 from typing import Callable, Optional
 
-from .. import APP_TITLE, APP_VERSION
+from .. import APP_TITLE, APP_VERSION, PROJECT_URL
 from ..core import fileutil, paths
 from ..core.model import Mode
 from ..crypto import keystore as ks
 from ..storage.logger import Logger
 from ..storage.store import Store, archive_legacy_database
-from ..system import autostart, single_instance
+from ..system import autostart, single_instance, touch as touchinput, update
 from ..copy.engine import Engine
 from . import dialogs as D
 from . import theme as T
 from . import widgets as W
-from .pages import (ExcludePage, LogsPage, RecordsPage, SchedulePage,
+from .pages import (AboutPage, ExcludePage, LogsPage, RecordsPage, SchedulePage,
                     SettingsPage, StatusPage, ToolsPage)
 
 try:  # pywin32 缺失时程序仍然可用（只是没有托盘图标）
@@ -31,12 +31,10 @@ try:  # pywin32 缺失时程序仍然可用（只是没有托盘图标）
 except Exception:  # pragma: no cover - 取决于运行环境
     TrayIcon = None  # type: ignore[assignment]
 
-PAGE_TITLES = ["状态", "监控记录", "排除名单", "定时切换", "工具", "设置", "日志"]
+PAGE_TITLES = ["状态", "监控记录", "排除名单", "定时切换", "工具", "设置", "日志",
+               "关于"]
 PAGE_CLASSES = [StatusPage, RecordsPage, ExcludePage, SchedulePage,
-                ToolsPage, SettingsPage, LogsPage]
-
-#: 点版本号跳转的项目主页。
-PROJECT_URL = "https://github.com/816633/securevault"
+                ToolsPage, SettingsPage, LogsPage, AboutPage]
 
 
 def enable_dpi_awareness() -> float:
@@ -160,6 +158,11 @@ class SecureVaultApp:
         self.silent = silent
         self.review = review
         self.dirs = paths.resolve(dev)
+        # 上次「下载并覆盖」留下的旧文件在这里清掉（程序已经换成新的了）
+        try:
+            update.cleanup_backups(self.dirs.exe_dir)
+        except Exception:
+            pass
         dpi = enable_dpi_awareness()
         self.scale = max(0.75, min(3.0, dpi / 96.0))
         T.set_scale(self.scale)
@@ -317,8 +320,13 @@ class SecureVaultApp:
             return
         self._tray_error = ""
         icon = T.icon_path() or ""
-        self.tray = TrayIcon(icon, APP_TITLE, self._on_tray_open, self._on_tray_exit)
-        self.tray.start()
+        try:
+            self.tray = TrayIcon(icon, APP_TITLE, self._on_tray_open,
+                                 self._on_tray_exit)
+            self.tray.start()
+        except Exception as exc:  # 托盘起不来也不能影响程序本身
+            self.tray = None
+            self._tray_error = "托盘图标不可用：%s" % exc
 
     def _open_keystore(self) -> None:
         try:
@@ -402,11 +410,6 @@ class SecureVaultApp:
                 store.save_settings(settings)
         finally:
             store.close()
-
-    def _start_tray(self) -> None:
-        icon = T.icon_path() or ""
-        self.tray = TrayIcon(icon, APP_TITLE, self._on_tray_open, self._on_tray_exit)
-        self.tray.start()
 
     # ------------------------------------------------------------------
     # 视图切换（锁屏 / 首次设置 / 主面板）
@@ -625,6 +628,8 @@ class SecureVaultApp:
             self.store = Store(self.dirs.db_file, dek, self.dirs.tmp)
             settings = self.store.load_settings()
             self.logger.set_retention(settings.log_retention)
+            # 触屏：点输入框是否自动弹出屏幕键盘（没有触摸设备的电脑上无影响）
+            touchinput.set_enabled(bool(getattr(settings, "touch_keyboard", True)))
             if self.keystore.auto_unlock_supported():
                 if settings.background_monitor and not self.keystore.auto_unlock_enabled():
                     self.keystore.enable_auto_unlock()
@@ -711,8 +716,18 @@ class SecureVaultApp:
     # ------------------------------------------------------------------
 
     def change_password(self) -> None:
-        old = D.ask_password_old(self.root, "修改密码", "请输入当前密码：", "下一步")
+        old = D.ask_password_old(self.root, "修改密码", "请输入当前密码：", "下一步",
+                                 show_forgot=True)
         if old is None:
+            return
+        if isinstance(old, dict) and old.get("forgot"):
+            # 忘记当前密码：走恢复码重置（重置时就会设定新密码），然后回到本页
+            if self.reset_with_recovery(open_panel=False):
+                self.notify("密码已通过恢复码重置，新密码已经生效。", "success")
+                D.message(self.root, "已重置",
+                          "密码已通过恢复码重置为新密码。\n"
+                          "如需再改一次，请重新点「修改密码…」。", ("确定",))
+                self.refresh_page()
             return
         if isinstance(old, dict):
             return
@@ -745,8 +760,17 @@ class SecureVaultApp:
 
     def rotate_recovery(self) -> None:
         password = D.ask_password_old(self.root, "重新生成恢复码",
-                                      "请输入当前密码（旧恢复码将立即失效）：", "确定")
-        if password is None or isinstance(password, dict):
+                                      "请输入当前密码（旧恢复码将立即失效）：", "确定",
+                                      show_forgot=True)
+        if password is None:
+            return
+        if isinstance(password, dict) and password.get("forgot"):
+            # 忘记密码：用恢复码重置——重置本身就会轮换出新的恢复码并显示出来
+            if self.reset_with_recovery(open_panel=False):
+                self.notify("密码与恢复码都已通过恢复码重置。", "success")
+                self.refresh_page()
+            return
+        if isinstance(password, dict):
             return
         try:
             code = self.keystore.rotate_recovery(password)
@@ -768,8 +792,10 @@ class SecureVaultApp:
         重置完密码后继续原来的操作）。返回是否重置成功。
         """
         while True:
-            code = D.ask_text_old(self.root, "忘记密码",
-                                  "请输入恢复码（格式 XXXX-XXXX-XXXX，不区分大小写）：")
+            code = D.ask_text_old(
+                self.root, "忘记密码", "请输入恢复码（12 位，XXXX-XXXX-XXXX）：",
+                note="恢复码不区分大小写，横线可有可无；"
+                     "校验通过后就可以设置新密码。")
             if code is None:
                 return False
             error = validate_recovery_code(code)
@@ -908,8 +934,12 @@ class SecureVaultApp:
         if self.keystore and self.keystore.initialized:
             result = D.ask_password_old(self.root, "退出程序",
                                         "退出前请输入密码：", "退出",
-                                        validator=self._validate_identity)
+                                        validator=self._validate_identity,
+                                        force_exit="强制退出",
+                                        on_force_exit=self.force_exit_dialog)
             if result is None:
+                return
+            if isinstance(result, dict) and result.get("force"):
                 return
             if isinstance(result, dict) and result.get("forgot"):
                 # 隐藏入口：用恢复码重置密码，然后继续原来的"退出"流程
@@ -920,6 +950,54 @@ class SecureVaultApp:
                              ("退出", "取消"), kind="question") != 0:
                     return
         self.quit()
+
+    # ------------------------------------------------------------------
+    # 强制退出（忘记密码、打不开面板时的出口）
+    # ------------------------------------------------------------------
+
+    def force_exit_dialog(self) -> None:
+        """弹确认框；确认后强退程序并关掉开机自启。"""
+        answer = D.message(
+            self.root, "强制退出",
+            "强制退出会立即关闭 SecureVault，并关掉「开机自动启动」。\n"
+            "下次开机不会自动运行，需要手动双击 SecureVault.exe 才能启动。",
+            ("强制退出", "取消"), kind="warn")
+        if answer != 0:
+            return
+        self.force_exit()
+
+    def force_exit(self) -> None:
+        """不校验密码，直接关掉开机自启并退出程序。"""
+        self.disable_autostart()
+        try:
+            if self.logger:
+                self.logger.warn("执行了强制退出：开机自启已关闭")
+        except Exception:
+            pass
+        self.quit()
+
+    def disable_autostart(self) -> bool:
+        """关掉开机自启：既删快捷方式，也把设置里的开关同步关掉。"""
+        ok = False
+        try:
+            ok = bool(autostart.disable())
+        except Exception:
+            ok = False
+        try:
+            if self.engine:
+                settings = self.engine.settings
+                if settings.autostart:
+                    settings.autostart = False
+                    self.engine.store.save_settings(settings)
+        except Exception:
+            pass
+        return ok
+
+    def restart_now(self) -> None:
+        """「下载并覆盖」完成后重启程序。"""
+        target = paths.launch_script()
+        self.quit()
+        update.restart(target)
 
     def quit(self) -> None:
         self.running = False

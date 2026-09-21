@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import time
 import traceback
+import zipfile
 from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -79,6 +81,8 @@ def run_selftest(dirs=None, verbose: bool = True) -> int:
         _test_devices(runner)
         _test_engine(runner, dirs)
         _test_single_instance(runner)
+        _test_update(runner)
+        _test_touch(runner)
     except Exception:
         runner.record("FAIL", "自检过程中出现异常：\n" + traceback.format_exc())
         runner.failed += 1
@@ -569,6 +573,153 @@ def _test_engine(runner: Runner, dirs) -> None:
     logger.close()
     store.close()
     shutil.rmtree(work, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 在线更新（版本比较、地址拼接、解包与覆盖）
+# ---------------------------------------------------------------------------
+
+SAMPLE_URL = ("https://github.com/816633/securevault/releases/download/v2.4.1/"
+              "SecureVault-2.4.1-win64-portable.zip")
+
+
+def _read(path: str) -> str:
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _test_update(runner: Runner) -> None:
+    runner.section("在线更新")
+    from securevault.system import update
+
+    runner.check("版本号比较：2.4.2 比 2.4.1 新", update.is_newer("v2.4.2", "2.4.1"))
+    runner.check("版本号比较：同级不算更新", not update.is_newer("2.4.1", "v2.4.1"))
+    runner.check("版本号比较：旧版本不算更新", not update.is_newer("2.3.9", "2.4.1"))
+    runner.check("官方源地址与发布页一致",
+                 update.download_url("2.4.1", "SecureVault-2.4.1-win64-portable.zip",
+                                     "github") == SAMPLE_URL,
+                 update.download_url("2.4.1", "SecureVault-2.4.1-win64-portable.zip",
+                                     "github"))
+    runner.check("CloudFlare 优选 IPv4 源地址正确",
+                 update.build_url("v4", SAMPLE_URL)
+                 == "https://v4.gh-proxy.org/" + SAMPLE_URL)
+    runner.check("CloudFlare 全球源地址正确",
+                 update.build_url("global", SAMPLE_URL)
+                 == "https://gh-proxy.org/" + SAMPLE_URL)
+    runner.check("三个下载源都有名字", len(update.source_options()) == 3)
+    runner.check("默认下载源是加速源", update.DEFAULT_SOURCE != "github")
+
+    work = tempfile.mkdtemp(prefix="sv-update-")
+    try:
+        package = os.path.join(work, "SecureVault-2.4.2-win64-portable.zip")
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("SecureVault/SecureVault.exe", "MZ" + "x" * 8192)
+            archive.writestr("SecureVault/_internal/new.dll", "new-dll")
+            archive.writestr("SecureVault/assets/securevault.ico", "icon")
+            archive.writestr("SecureVault/请先读我.txt", "说明文件")
+            archive.writestr("SecureVault/SecureVaultData/vault.db", "不该被覆盖")
+
+        target = os.path.join(work, "target")
+        os.makedirs(target)
+        _write(os.path.join(target, "SecureVault.exe"), "old-exe")
+        _write(os.path.join(target, "_internal", "old.dll"), "old-dll")
+        _write(os.path.join(target, "SecureVaultData", "vault.db"), "我的数据")
+        _write(os.path.join(target, "user-note.txt"), "用户自己的文件")
+
+        staging, count = update.stage(package, work)
+        runner.check("更新包会自动去掉顶层目录", count == 3, str(count))
+        runner.check("更新包里有程序本体",
+                     os.path.isfile(os.path.join(staging, "SecureVault.exe")))
+        runner.check("说明文件不会被解出来",
+                     not os.path.exists(os.path.join(staging, "请先读我.txt")))
+        runner.check("数据目录不会被解出来",
+                     not os.path.exists(os.path.join(staging, "SecureVaultData")))
+
+        result = update.apply_staging(staging, target)
+        runner.check("覆盖更新没有失败项", not result["failed"], str(result["failed"][:2]))
+        runner.check("程序本体被替换",
+                     _read(os.path.join(target, "SecureVault.exe")).startswith("MZ"))
+        runner.check("新增文件写进去了",
+                     os.path.isfile(os.path.join(target, "_internal", "new.dll")))
+        runner.check("原有的其它文件保留",
+                     os.path.isfile(os.path.join(target, "_internal", "old.dll")))
+        runner.check("用户自己的文件不被动",
+                     os.path.isfile(os.path.join(target, "user-note.txt")))
+        runner.check("数据目录里的数据库没被动",
+                     _read(os.path.join(target, "SecureVaultData", "vault.db"))
+                     == "我的数据")
+
+        # 只读 / 被占用的文件：先改名让位，再把新文件写进去
+        readonly = os.path.join(target, "SecureVault.exe")
+        os.chmod(readonly, stat.S_IREAD)
+        second = update.apply_staging(staging, target)
+        runner.check("只读文件也能替换（改名让位）", not second["failed"],
+                     str(second["failed"][:2]))
+        runner.check("替换后程序本体仍然是新版本",
+                     _read(readonly).startswith("MZ"))
+        os.chmod(readonly, stat.S_IWRITE | stat.S_IREAD)
+        backups = update.cleanup_backups(target)
+        runner.check("覆盖留下的旧文件会被清理", backups >= 1, str(backups))
+
+        # 没有 SecureVault.exe 的压缩包必须拒绝覆盖
+        bad = os.path.join(work, "bad.zip")
+        with zipfile.ZipFile(bad, "w") as archive:
+            archive.writestr("SecureVault/readme.md", "这不是程序包")
+        error = ""
+        try:
+            update.stage(bad, work)
+        except update.UpdateError as exc:
+            error = str(exc)
+        runner.check("缺程序本体的包会被拒绝", bool(error), error)
+
+        # 越界路径必须挡住
+        slip = os.path.join(work, "slip.zip")
+        with zipfile.ZipFile(slip, "w") as archive:
+            archive.writestr("SecureVault/SecureVault.exe", "MZ")
+            archive.writestr("SecureVault/../evil.txt", "坏东西")
+        blocked = ""
+        try:
+            update.stage(slip, work)
+        except update.UpdateError as exc:
+            blocked = str(exc)
+        runner.check("压缩包里的越界路径会被挡住", bool(blocked), blocked)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _test_touch(runner: Runner) -> None:
+    runner.section("触屏支持")
+    from securevault.system import touch
+
+    original_launch = touch._launch
+    original_touch = touch._touch
+    original_flag = os.environ.get("SV_TOUCH")
+    calls = []
+    touch._launch = lambda path: (calls.append(path), True)[1]
+    try:
+        touch.set_enabled(False)
+        calls.clear()
+        runner.check("关掉开关时不唤起屏幕键盘",
+                     touch.show_keyboard() is False and not calls)
+        touch.set_enabled(True)
+        os.environ["SV_TOUCH"] = "1"
+        touch._touch = None
+        launched = touch.show_keyboard()
+        runner.check("触摸设备上会唤起屏幕键盘", launched is True and bool(calls),
+                     "%s / %s" % (launched, calls))
+        touch._touch = None
+        os.environ["SV_TOUCH"] = "0"
+        runner.check("非触摸设备上不打扰用户", touch.touch_available() is False)
+        runner.check("非触摸设备上不唤起键盘",
+                     touch.show_keyboard() is False)
+    finally:
+        touch._launch = original_launch
+        touch._touch = original_touch
+        touch.set_enabled(True)
+        if original_flag is None:
+            os.environ.pop("SV_TOUCH", None)
+        else:
+            os.environ["SV_TOUCH"] = original_flag
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import tkinter as tk
 from tkinter import filedialog
 
 from ...core.model import LOG_RETENTION_OPTIONS, Mode
-from ...system import autostart
+from ...system import autostart, touch as touchinput
 from .. import dialogs as D
 from .. import theme as T
 from .. import widgets as W
@@ -59,6 +59,10 @@ class SettingsPage(Page):
                               "重启后必须先输入密码才会开始监控。",
                  bg=T.CARD, fg=T.TEXT_DIM, font=self.fonts.get("small"),
                  anchor="w", justify="left").pack(anchor="w", padx=(T.px(20), 0))
+        self.touch_keyboard = W.FlatCheck(
+            options, "触屏设备：点输入框时自动弹出屏幕键盘", True,
+            font=self.fonts.get("base"), bg=T.CARD)
+        self.touch_keyboard.pack(anchor="w", pady=(T.px(4), 0))
         self.verify_dest = W.FlatCheck(
             options, "复制前检查目标文件是否还在（被误删了就重新复制）", True,
             font=self.fonts.get("base"), bg=T.CARD,
@@ -180,6 +184,7 @@ class SettingsPage(Page):
         settings.record_removal = self.record_removal.value
         settings.minimize_to_tray = self.minimize_to_tray.value
         settings.background_monitor = self.background.value
+        settings.touch_keyboard = self.touch_keyboard.value
         settings.autostart = self.autostart.value
         settings.verify_dest_exists = self.verify_dest.value
         settings.verify_dest_action = self.verify_action.value
@@ -195,6 +200,10 @@ class SettingsPage(Page):
             self.ctx.app.apply_background_setting(settings.background_monitor)
         except Exception as exc:
             self.ctx.notify("后台运行设置失败：%s" % exc, "warn")
+        try:
+            touchinput.set_enabled(settings.touch_keyboard)
+        except Exception:
+            pass
         self.save_hint.set_text("已保存。", T.SUCCESS)
         self.ctx.notify("设置已保存并生效。", "success")
         self.refresh_paths()
@@ -210,6 +219,7 @@ class SettingsPage(Page):
         self.record_removal.set(settings.record_removal)
         self.minimize_to_tray.set(settings.minimize_to_tray)
         self.background.set(settings.background_monitor)
+        self.touch_keyboard.set(getattr(settings, "touch_keyboard", True))
         self.verify_dest.set(getattr(settings, "verify_dest_exists", True))
         self.verify_action.set(getattr(settings, "verify_dest_action", "recopy"))
         self.verify_action.set_enabled(self.verify_dest.value)

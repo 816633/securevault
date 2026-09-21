@@ -5,6 +5,7 @@
     -silent    静默启动：只驻留托盘，不弹任何窗口（开机自启用的就是它）
     -debug     输出调试信息（默认全程静默，不打印任何东西）
     -help      显示帮助
+    -updatecheck 逐个下载源检查一次更新，结果写到「数据目录」下的 update-check.txt
     -review    界面评审模式：跳过密码、写入演示数据后直接打开面板（开发用）
     -autotest  自动验收：跑一遍完整流程并把结果写入日志（开发用）
     -selftest  只跑逻辑自检（等价于 -autotest 但不启动界面）
@@ -32,6 +33,7 @@ HELP_TEXT = """%s %s —— U 盘自动复制与监控工具
   -silent     静默启动：只驻留托盘，不显示窗口（开机自启使用）
   -debug      输出调试信息
   -help       显示本帮助
+  -updatecheck 检查更新（结果写到 <数据目录>\\update-check.txt）
   -review     界面评审模式（开发用，使用独立数据目录）
   -autotest   自动验收（开发用，使用独立数据目录）
   -selftest   只跑逻辑自检（开发用，使用独立数据目录）
@@ -56,8 +58,12 @@ def prepare_frozen_runtime() -> None:
     base = getattr(sys, "_MEIPASS", "")
     if not base:
         return
-    tcl_dir = os.path.join(base, "tcl")
-    tk_dir = os.path.join(base, "tk")
+    tcl_dir, tk_dir = _tcl_dirs(base)
+    # 新版 PyInstaller 的 onedir 布局（exe 旁边是 _internal\）不需要等解压：
+    # 数据早就摆好了，直接返回，避免白等。
+    if not os.path.isdir(os.path.join(tcl_dir, "encoding")) and \
+            not os.path.isfile(os.path.join(tk_dir, "tk.tcl")):
+        return
     if os.path.isdir(tcl_dir):
         os.environ["TCL_LIBRARY"] = tcl_dir
     if os.path.isdir(tk_dir):
@@ -83,6 +89,18 @@ def prepare_frozen_runtime() -> None:
     waited = time.time() - started
     if os.environ.get("SV_TCL_DIAG"):
         _write_tcl_diag(base, tcl_dir, tk_dir, waited)
+
+
+def _tcl_dirs(base: str):
+    """找到 Tcl / Tk 数据目录：老版放在 ``tcl`` / ``tk``，新版放在
+    ``_tcl_data`` / ``_tk_data``。"""
+    for tcl_name, tk_name in (("tcl", "tk"), ("_tcl_data", "_tk_data")):
+        tcl_dir = os.path.join(base, tcl_name)
+        tk_dir = os.path.join(base, tk_name)
+        if os.path.isfile(os.path.join(tcl_dir, "init.tcl")) or \
+                os.path.isfile(os.path.join(tk_dir, "tk.tcl")):
+            return tcl_dir, tk_dir
+    return os.path.join(base, "tcl"), os.path.join(base, "tk")
 
 
 def _count_files(root: str) -> int:
@@ -134,7 +152,8 @@ def _write_tcl_diag(base: str, tcl_dir: str, tk_dir: str, waited: float) -> None
 
 def parse_args(argv):
     flags = {"silent": False, "debug": False, "help": False, "review": False,
-             "autotest": False, "selftest": False, "diag": False}
+             "autotest": False, "selftest": False, "diag": False,
+             "updatecheck": False}
     for raw in argv:
         token = raw.strip().lstrip("-/").lower()
         if token in ("h", "help", "?"):
@@ -154,6 +173,44 @@ def _message_box(title: str, text: str, kind: int = 0x10) -> None:
         ctypes.windll.user32.MessageBoxW(None, text, title, kind)
     except Exception:
         pass
+
+
+def run_update_check(dirs) -> int:
+    """逐个下载源检查一次更新，结果写到数据目录下的 ``update-check.txt``。
+
+    打包后没有控制台，这个文件就是排查"检查更新失败"现场的唯一出口。
+    """
+    from securevault import APP_VERSION
+    from securevault.system import update
+
+    lines = ["SecureVault %s 检查更新（本机时间 %s）"
+             % (APP_VERSION, time.strftime("%Y-%m-%d %H:%M:%S"))]
+    failed = 0
+    for key, label, prefix in update.SOURCES:
+        try:
+            info = update.check_for_update(key)
+        except Exception as exc:
+            failed += 1
+            lines.append("[失败] %s（%s）%s" % (label, prefix or "直连", exc))
+            continue
+        lines.append("[成功] %s（%s）" % (label, prefix or "直连"))
+        lines.append("        最新版本：%s（当前 %s，%s）"
+                     % (info["latest"], APP_VERSION,
+                        "有新版本" if info["newer"] else "已是最新"))
+        lines.append("        下载地址：%s" % info["url"])
+        lines.append("        文件大小：%s" % update.describe_size(info["size"]))
+    lines.append("")
+    lines.append("结论：%d/%d 个下载源可用。" % (len(update.SOURCES) - failed,
+                                              len(update.SOURCES)))
+    target = os.path.join(dirs.root, "update-check.txt")
+    try:
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        _message_box(APP_NAME, "检查结果无法写入 %s：%s" % (target, exc))
+        return 4
+    print("\n".join(lines))
+    return 0 if failed < len(update.SOURCES) else 4
 
 
 def run_diagnostics() -> int:
@@ -280,6 +337,9 @@ def main(argv=None) -> int:
 
     if flags["diag"]:
         return run_diagnostics()
+
+    if flags["updatecheck"]:
+        return run_update_check(dirs)
 
     from securevault.system import single_instance
 
