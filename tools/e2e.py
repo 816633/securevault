@@ -418,7 +418,7 @@ def _about_page_checks(app, report) -> None:
 
     asked = []
     original_check = update_mod.check_for_update
-    update_mod.check_for_update = lambda source, timeout=30: (
+    update_mod.check_for_update = lambda source, timeout=30, insecure=False: (
         asked.append(source), fake_info(source))[1]
     try:
         page.check_now()
@@ -451,9 +451,31 @@ def _about_page_checks(app, report) -> None:
                  and "2026-09-20" in page.detail_label.cget("text"),
                  page.detail_label.cget("text"))
     sources = [text for _key, text in page.source._choices]
-    report.check("下载源仍可选官方源与两个 gh-proxy 加速源",
+    report.check("线路可选官方源与两个 gh-proxy 加速源",
                  len(sources) == 3 and "官方源" in sources[0]
                  and "推荐" in sources[1] and "全球" in sources[2], str(sources))
+    report.check("线路默认是官方源",
+                 page.source.value == "github"
+                 and update_mod.DEFAULT_SOURCE == "github", page.source.value)
+    report.check("「下载并覆盖」单独一行（不和线路挤在一行）",
+                 page.download_button.master is page.action_row
+                 and page.source.master is not page.action_row)
+
+    # 检查走的是"线路"里选中的那条
+    asked.clear()
+    update_mod.check_for_update = lambda source, timeout=30, insecure=False: (
+        asked.append(source), fake_info(source))[1]
+    try:
+        page.source.set("v4")
+        page.check_now()
+        pump(app, 0.4)
+        drain_queue(app)
+        pump(app, 0.2)
+    finally:
+        update_mod.check_for_update = original_check
+        page.source.set("github")
+    report.check("改线路后检查走选中的那条", asked == ["v4"], str(asked))
+
 
     # 源码运行时不写程序目录（避免把源码目录覆盖成程序文件）
     blocked = []
@@ -467,6 +489,37 @@ def _about_page_checks(app, report) -> None:
     report.check("源码运行时不执行覆盖更新",
                  not blocked and "源码运行" in app.notify_bar.label.cget("text"),
                  app.notify_bar.label.cget("text"))
+
+    # 当前版本比线上新：允许回退，并且下载前会给出提示
+    older_info = fake_info("github")
+    older_info.update({"latest": "0.9.0", "tag": "v0.9.0", "newer": False,
+                       "asset": "SecureVault-0.9.0-win64-portable.zip"})
+    messages = []
+    original_message = D.message
+    update_mod.check_for_update = lambda source, timeout=30, insecure=False: older_info
+    had_frozen_rollback = hasattr(sys, "frozen")
+    sys.frozen = True
+    try:
+        page.check_now()
+        pump(app, 0.4)
+        drain_queue(app)
+        pump(app, 0.2)
+        report.check("当前版本更新时按钮变成「回退到这个版本」",
+                     page.download_button.text == "回退到这个版本"
+                     and page.download_button._enabled,
+                     page.download_button.text)
+        D.message = app_module.D.message = lambda *a, **k: (
+            messages.append(a[1] if len(a) > 1 else ""), 1)[1]   # 这里点「取消」
+        page.download_and_apply()
+        pump(app, 0.2)
+    finally:
+        update_mod.check_for_update = original_check
+        D.message = app_module.D.message = original_message
+        if not had_frozen_rollback:
+            del sys.frozen
+    report.check("回退前会提示确认（提示里写明是回退）",
+                 any("回退" in text for text in messages), str(messages[:1]))
+    report.check("回退确认框点「取消」就不下载", not page._busy)
 
     # 下载 → 解包 → 覆盖 → 重启（联网部分用替身，流程是真的）
     calls = []
@@ -505,7 +558,7 @@ def _about_page_checks(app, report) -> None:
                  page.progress_label.cget("text"))
 
     # 检查失败也要有明确提示（不能点了没反应）
-    def boom(source, timeout=30):
+    def boom(source, timeout=30, insecure=False):
         raise update_mod.UpdateError("连接失败：测试用错误")
 
     update_mod.check_for_update = boom
@@ -663,19 +716,49 @@ def _touch_checks(app, report) -> None:
     called = []
     original_keyboard = touchmod.show_keyboard
     touchmod.show_keyboard = lambda force=False: (called.append(True), True)[1]
+    original_touch_cache = touchmod._touch
+    original_env = os.environ.get("SV_TOUCH"), os.environ.get("SV_TOUCH_CLICK")
     try:
-        page.copy_dest.entry.event_generate("<FocusIn>")
+        # 1) 有触摸屏的电脑上，用鼠标点输入框：不弹键盘
+        os.environ["SV_TOUCH"] = "1"
+        os.environ["SV_TOUCH_CLICK"] = "0"
+        touchmod._touch = None
+        pump(app, 0.1)
+        page.copy_dest.entry.event_generate("<ButtonPress-1>")
+        pump(app, 0.2)
+        report.check("鼠标点输入框不会弹屏幕键盘", not called, str(len(called)))
+
+        # 2) 手指点输入框：弹（面板上的输入框与密码弹窗都算）
+        os.environ["SV_TOUCH_CLICK"] = "1"
+        page.copy_dest.entry.event_generate("<ButtonPress-1>")
         pump(app, 0.2)
         dialog = D.PasswordDialog(app.root, "触屏检查", "请输入密码：", "确定")
         dialog.reveal(app.root)
         pump(app, 0.3)
-        dialog.entry.event_generate("<FocusIn>")
+        dialog.entry.event_generate("<ButtonPress-1>")
         pump(app, 0.2)
         dialog._safe_destroy()
     finally:
         touchmod.show_keyboard = original_keyboard
-    report.check("点输入框会请求屏幕键盘（面板与密码弹窗都算）",
+        touchmod._touch = original_touch_cache
+        for key, value in zip(("SV_TOUCH", "SV_TOUCH_CLICK"), original_env):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    report.check("手指点输入框会唤起屏幕键盘（面板与密码弹窗都算）",
                  len(called) >= 2, str(len(called)))
+    report.check("屏幕键盘按优先级挑程序（触摸键盘优先，老式屏幕键盘兜底）",
+                 all(path.lower().endswith(".exe")
+                     for path in touchmod.keyboard_paths())
+                 and (not touchmod.keyboard_paths()
+                      or "tabtip.exe" in touchmod.keyboard_paths()[0].lower()
+                      or len(touchmod.keyboard_paths()) == 1),
+                 str(touchmod.keyboard_paths()))
+    guid = touchmod._guid(touchmod.CLSID_TIP_INVOCATION)
+    report.check("触摸键盘的 COM 接口地址解析正确",
+                 guid.Data1 == 0x4CE576FA and guid.Data2 == 0x83DC,
+                 "%08X-%04X" % (guid.Data1, guid.Data2))
 
     area = None
     for child in page.winfo_children():
@@ -721,6 +804,63 @@ def _touch_checks(app, report) -> None:
     report.check("表格里拖动优先划选（不带动整页）",
                  W._drag_blocked(app._pages[1].tree)
                  and not W._drag_blocked(area.canvas))
+
+    # ---- 滑"里面的东西"时整页不能跟着动 ----
+    status_page = app._pages[0]
+    status_area = None
+    for child in status_page.winfo_children():
+        if isinstance(child, W.ScrollArea):
+            status_area = child
+    app.tabbar.select(0)
+    pump(app, 0.3)
+    page_before = status_area.canvas.yview()[0]
+    status_area._on_wheel(type("_Wheel", (), {"widget": status_page.device_tree,
+                                              "delta": -120})())
+    pump(app, 0.15)
+    report.check("在表格上滚轮只滚表格、不带整页",
+                 status_area.canvas.yview()[0] == page_before,
+                 "%s → %s" % (page_before, status_area.canvas.yview()[0]))
+
+    about_page = app._pages[app_module.PAGE_TITLES.index("关于")]
+    about_area = None
+    for child in about_page.winfo_children():
+        if isinstance(child, W.ScrollArea):
+            about_area = child
+    text_box = about_page.notes.text
+    os.environ["SV_TOUCH"] = "1"
+    os.environ["SV_TOUCH_CLICK"] = "1"
+    touchmod._touch = None
+    try:
+        app.tabbar.select(app_module.PAGE_TITLES.index("关于"))
+        pump(app, 0.4)
+        # 让文本框里真的有很多行，才滑得动
+        about_page.notes.set_text("\n".join("第 %d 行内容" % line
+                                            for line in range(80)))
+        pump(app, 0.2)
+        page_before = about_area.canvas.yview()[0]
+        text_before = text_box.yview()[0]
+        # 手指往上推（看后面的内容）：起点在下方，终点在上方
+        text_box.event_generate("<ButtonPress-1>", rootx=10, rooty=70)
+        pump(app, 0.1)
+        text_box.event_generate("<B1-Motion>", rootx=10, rooty=10)
+        pump(app, 0.1)
+        text_box.event_generate("<ButtonRelease-1>", rootx=10, rooty=10)
+        pump(app, 0.15)
+        report.check("触屏在文本框里拖动滑的是文本框自己",
+                     text_box.yview()[0] != text_before,
+                     "%s → %s" % (text_before, text_box.yview()[0]))
+        report.check("滑里面的内容时整页不动",
+                     about_area.canvas.yview()[0] == page_before,
+                     "%s → %s" % (page_before, about_area.canvas.yview()[0]))
+    finally:
+        touchmod._touch = original_touch_cache
+        for key, value in zip(("SV_TOUCH", "SV_TOUCH_CLICK"), original_env):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        app.tabbar.select(index)
+        pump(app, 0.2)
 
 
 def main() -> int:
@@ -1147,6 +1287,26 @@ def main() -> int:
         # 退出
         app.quit()
         report.check("退出后不再运行", not app.running)
+
+        # 重新启动（数据已初始化）：启动时不再弹密码窗口，只驻留托盘
+        second = app_module.SecureVaultApp(dev=True)
+        pump(second, 0.8)
+        report.check("再启动时不弹密码窗口（直接驻留托盘）",
+                     second._lock_window is None and second._setup_window is None
+                     and second.root.state() == "withdrawn",
+                     "lock=%s setup=%s state=%s"
+                     % (second._lock_window, second._setup_window,
+                        second.root.state()))
+        tray_view = None
+        second._tray_open()
+        pump(second, 0.5)
+        tray_view = second._lock_window
+        report.check("托盘左键单击才弹出解锁窗口",
+                     tray_view is not None and tray_view.winfo_exists() == 1)
+        report.check("启动时后台服务状态（能自动解锁就已在跑）",
+                     isinstance(second._service_started, bool),
+                     str(second._service_started))
+        second.quit()
     except Exception:
         report.failed += 1
         print("[FAIL] 测试过程中出现异常：\n" + traceback.format_exc())

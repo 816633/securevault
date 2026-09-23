@@ -97,9 +97,14 @@ class AboutPage(Page):
         card = W.Card(body, "检查更新", self.fonts)
         card.pack(fill="x", padx=T.px(T.PAD), pady=(T.px(T.GAP), T.px(T.PAD)))
 
-        # 一开始只显示一个「检查更新」按钮，查完才展开下面的结果区
+        # 第一行：线路 + 检查更新按钮；结果区查完才展开
         row = tk.Frame(card.body, bg=T.CARD)
         row.pack(fill="x")
+        tk.Label(row, text="线路", bg=T.CARD, fg=T.TEXT_DIM,
+                 font=self.fonts.get("base")).pack(side="left")
+        self.source = W.FlatSelect(row, update.source_options(),
+                                   update.DEFAULT_SOURCE, font=self.fonts.get("base"))
+        self.source.pack(side="left", padx=(T.px(8), T.px(10)))
         self.check_button = W.FlatButton(row, text="检查更新", kind="primary",
                                          command=self.check_now,
                                          font=self.fonts.get("base"),
@@ -133,25 +138,17 @@ class AboutPage(Page):
                                 readonly=True)
         self.notes.pack(fill="x", pady=(T.px(4), 0))
 
-        # 操作按钮放在更新内容上面：一屏就能看到「下载并覆盖」
+        # 下载单独一行：线路在上面选，这里只放按钮与进度
         self.action_row = tk.Frame(self.result_box, bg=T.CARD)
-        tk.Label(self.action_row, text="下载源", bg=T.CARD, fg=T.TEXT_DIM,
-                 font=self.fonts.get("base")).pack(side="left",
-                                                   pady=(T.px(6), 0))
-        self.source = W.FlatSelect(self.action_row, update.source_options(),
-                                   update.DEFAULT_SOURCE, font=self.fonts.get("base"),
-                                   command=lambda _key: self._render_result())
-        self.source.pack(side="left", padx=(T.px(8), T.px(10)), pady=(T.px(6), 0))
         self.download_button = W.FlatButton(self.action_row, text="下载并覆盖",
                                             kind="danger",
                                             command=self.download_and_apply,
                                             font=self.fonts.get("base"))
-        self.download_button.pack(side="left", pady=(T.px(6), 0))
+        self.download_button.pack(side="left")
         self.download_button.set_enabled(False)
         self.progress = W.ProgressBar(self.action_row, width=200, height=8,
                                       bg=T.CARD)
-        self.progress.pack(side="left", padx=(T.px(12), T.px(8)),
-                           pady=T.px(12))
+        self.progress.pack(side="left", padx=(T.px(12), T.px(8)), pady=T.px(6))
         self.progress_label = tk.Label(self.action_row, text="", bg=T.CARD,
                                        fg=T.TEXT_DIM,
                                        font=self.fonts.get("small"), anchor="w")
@@ -187,11 +184,12 @@ class AboutPage(Page):
             self._set_progress(0.0, "")
             return
         latest = info["latest"]
+        older = update.version_tuple(latest) < update.version_tuple(APP_VERSION)
         if info["newer"]:
             text = "v%s　有新版本（当前 v%s）" % (latest, APP_VERSION)
             color = T.SUCCESS
-        elif update.version_tuple(latest) < update.version_tuple(APP_VERSION):
-            text = "v%s　比当前版本旧（当前 v%s）" % (latest, APP_VERSION)
+        elif older:
+            text = "v%s　比当前版本旧（当前 v%s），可以回退" % (latest, APP_VERSION)
             color = T.WARN
         else:
             text = "v%s　已是最新版本" % latest
@@ -206,13 +204,18 @@ class AboutPage(Page):
         changes = update.changes_only(info["notes"]) or plain_notes(info["notes"])
         self.notes.set_text(plain_notes(changes)
                             or "（这个版本没有填写更新说明）")
-        self.download_button.set_enabled(bool(info["newer"]) and not self._busy)
+        # 有新版本可以升级；比线上版本新时也允许回退（下载前会再提示一次）
+        self.download_button.set_text("回退到这个版本" if older else "下载并覆盖")
+        self.download_button.set_enabled((bool(info["newer"]) or older)
+                                         and not self._busy)
         self._render_action()
 
     def _render_action(self) -> None:
-        """只有「发现新版本」时才显示下载源与下载按钮。"""
+        """只有「有新版本」或「可以回退」时才显示下载按钮。"""
         info = self._info
-        want = bool(info is not None and info["newer"])
+        want = bool(info is not None and (info["newer"]
+                                          or update.version_tuple(info["latest"])
+                                          < update.version_tuple(APP_VERSION)))
         if want == self._action_visible:
             return
         self._action_visible = want
@@ -248,35 +251,49 @@ class AboutPage(Page):
 
     # -- 检查 / 下载 ------------------------------------------------------
 
-    def check_now(self) -> None:
+    def check_now(self, insecure: bool = False) -> None:
         if self._busy:
             return
-        # 检查版本固定走官方源（下载时才需要选加速源）
+        source = self.source.value
         self._set_busy(True)
         self.check_button.set_text("正在检查更新…")
-        self.ctx.notify("正在检查更新…（官方源 github.com）")
-        self.ctx.log("info", "检查更新开始（官方源）")
+        self.ctx.notify("正在检查更新…（线路：%s）" % update.source_label(source))
+        self.ctx.log("info", "检查更新开始（线路：%s%s）"
+                     % (update.source_label(source),
+                        "，已忽略证书校验" if insecure else ""))
 
         def work() -> None:
             try:
-                info = update.check_for_update(update.CHECK_SOURCE)
+                info = update.check_for_update(source, insecure=insecure)
             except Exception as exc:
-                self.ctx.ui(self._on_checked, None, str(exc))
+                self.ctx.ui(self._on_checked, None, str(exc),
+                            update.is_ssl_error(exc))
                 return
-            self.ctx.ui(self._on_checked, info, "")
+            self.ctx.ui(self._on_checked, info, "", False)
 
         self.ctx.run_bg(work)
 
-    def _on_checked(self, info, error: str) -> None:
+    def _on_checked(self, info, error: str, ssl_problem: bool = False) -> None:
         self.check_button.set_text("检查更新")
         self._set_busy(False)
         if info is None:
             self.ctx.log("warn", "检查更新失败：%s" % error)
             if self._info is None:      # 之前查过就保留上次结果，别闪没
                 self._show_result(False)
-            self.ctx.notify("检查更新失败：%s" % error, "error")
+            self.ctx.notify("检查更新失败：%s" % error.splitlines()[0], "error")
+            if ssl_problem:
+                # 证书问题的应急出口：只用于查询版本号，下载仍然校验证书
+                answer = D.message(
+                    self, "HTTPS 证书校验失败",
+                    "%s\n\n程序自带了一份 CA 证书包，正常情况下不该出现这个问题。\n"
+                    "要「忽略证书校验」重查一次吗？（只对这次查询有效，"
+                    "下载更新包时仍然会校验证书。）" % error,
+                    ("忽略证书校验重查", "取消"), kind="warn")
+                if answer == 0:
+                    self.check_now(insecure=True)
+                return
             D.message(self, "检查更新失败",
-                      "没能从 GitHub 取到最新版本信息：\n%s\n\n"
+                      "没能取到最新版本信息：\n%s\n\n"
                       "请检查网络后重试；如果一直失败，可以手动到项目主页的 "
                       "Releases 页面下载压缩包。" % error, ("确定",), kind="error")
             return
@@ -289,7 +306,7 @@ class AboutPage(Page):
             self.ctx.notify("发现新版本 v%s（当前 v%s），可以点「下载并覆盖」。"
                             % (info["latest"], APP_VERSION), "success")
         elif update.version_tuple(info["latest"]) < update.version_tuple(APP_VERSION):
-            self.ctx.notify("线上最新发布是 v%s，当前版本 v%s 更新。"
+            self.ctx.notify("线上最新发布是 v%s，比当前 v%s 旧（有需要可以回退）。"
                             % (info["latest"], APP_VERSION), "success")
         else:
             self.ctx.notify("已经是最新版本（v%s）。" % APP_VERSION, "success")
@@ -309,32 +326,51 @@ class AboutPage(Page):
         if not info:
             self.ctx.notify("请先点「检查更新」。", "warn")
             return
-        if not info["newer"]:
+        older = update.version_tuple(info["latest"]) < update.version_tuple(APP_VERSION)
+        if not info["newer"] and not older:
             self.ctx.notify("当前已经是最新版本，不需要更新。")
             return
+        if older:
+            # 当前版本比线上新：允许回退，但要说清楚代价
+            answer = D.message(
+                self, "回退到旧版本",
+                "线上最新发布是 v%s，你现在用的 v%s 更新。\n\n"
+                "继续会用 v%s 覆盖当前程序（SecureVaultData 里的记录、设置、"
+                "密钥库、日志不会被动），"
+                "回退可能会丢掉新版本才有的功能与修复。\n\n确定要回退吗？"
+                % (info["latest"], APP_VERSION, info["latest"]),
+                ("回退到 v%s" % info["latest"], "取消"), kind="warn")
+            if answer != 0:
+                return
+            self._start_download(info, update.download_url(
+                info["latest"], info["asset"], self.source.value))
+            return
+        # 下载走"线路"下拉里当前选中的那条（检查之后改过线路也按最新的来）
+        url = update.download_url(info["latest"], info["asset"], self.source.value)
         answer = D.message(
             self, "下载并覆盖",
             "将从下面的地址下载 v%s：\n%s\n\n下载完成后会把程序文件覆盖到：\n%s"
-            % (info["latest"], info["url"], self.ctx.dirs.exe_dir),
+            % (info["latest"], url, self.ctx.dirs.exe_dir),
             ("下载并覆盖", "取消"), kind="question")
         if answer != 0:
             return
-        self._start_download(info)
+        self._start_download(info, url)
 
-    def _start_download(self, info) -> None:
+    def _start_download(self, info, url: str = "") -> None:
         work_dir = os.path.join(self.ctx.dirs.root, "update")
         zip_path = os.path.join(work_dir, info["asset"])
+        url = url or info["url"]
         self._set_busy(True)
         self.ctx.notify("开始下载 v%s（%s）…" % (info["latest"],
                                               update.describe_size(info["size"])))
-        self.ctx.log("info", "开始下载更新包：%s" % info["url"])
+        self.ctx.log("info", "开始下载更新包：%s" % url)
 
         def report(done: int, total: int) -> None:
             self.ctx.ui(self._on_progress, done, total)
 
         def work() -> None:
             try:
-                update.download(info["url"], zip_path, progress=report)
+                update.download(url, zip_path, progress=report)
                 self.ctx.ui(self._on_progress_text, "正在解包…")
                 staging, _count = update.stage(zip_path, work_dir)
                 self.ctx.ui(self._on_progress_text, "正在覆盖程序文件…")

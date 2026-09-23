@@ -23,11 +23,80 @@ def drag_scrolling() -> bool:
 
 
 def bind_touch_keyboard(widget) -> None:
-    """触屏设备上：点输入框自动唤起系统屏幕键盘（没有触摸设备时什么也不做）。"""
+    """触屏设备上：**用手指点**输入框才唤起系统屏幕键盘。
+
+    用鼠标点不弹（有触摸屏的笔记本插着鼠标时不会莫名其妙冒键盘），
+    程序自己聚焦（比如打开面板时自动聚焦）也不弹。
+    """
     try:
-        widget.bind("<FocusIn>", lambda _e: TCH.show_keyboard(), add="+")
+        widget.bind("<ButtonPress-1>", lambda _e: TCH.show_keyboard_for_touch(),
+                    add="+")
     except Exception:
         pass
+
+
+def enable_touch_scroll(widget) -> None:
+    """触屏：在列表 / 文本框里按住拖动时，滑的是它自己的内容，不是整页。
+
+    鼠标拖动照旧（表格划选、文本框选字），互不干扰。
+    """
+    state = {"active": False, "y": 0, "moved": False}
+
+    def on_press(event) -> None:
+        state["active"] = bool(TCH.last_input_is_touch())
+        state["y"] = event.y_root
+        state["moved"] = False
+
+    def on_move(event):
+        if not state["active"]:
+            return None
+        delta = int(event.y_root) - int(state["y"])
+        if not state["moved"]:
+            if abs(delta) < ScrollArea.DRAG_THRESHOLD:
+                return None
+            state["moved"] = True
+        if delta:
+            _scroll_widget_by(widget, delta)
+            state["y"] = event.y_root
+        return "break"          # 不吃掉这一下就会变成"拖拽划选"
+
+    def on_release(_event=None):
+        state["active"] = False
+        state["moved"] = False
+        return None
+
+    try:
+        widget.bind("<ButtonPress-1>", on_press, add="+")
+        widget.bind("<B1-Motion>", on_move, add="+")
+        widget.bind("<ButtonRelease-1>", on_release, add="+")
+    except Exception:
+        pass
+
+
+def _scroll_widget_by(widget, delta: int) -> None:
+    """按像素滚动某个可滚动控件（表格 / 文本框都是 ``yview_moveto``）。"""
+    try:
+        first, last = widget.yview()
+        span = max(1e-6, float(last) - float(first))
+        height = max(1, int(widget.winfo_height()))
+        target = float(first) - (float(delta) / height) * span
+        widget.yview_moveto(max(0.0, min(1.0 - span, target)))
+    except Exception:
+        pass
+
+
+def _scrollable_under(widget):
+    """从指针下面的控件往上找，找它自己会滚动的那个（表格 / 文本框）。"""
+    node = widget
+    while node is not None:
+        try:
+            name = node.winfo_class()
+        except Exception:
+            name = ""
+        if name in ("Treeview", "Text"):
+            return node
+        node = getattr(node, "master", None)
+    return None
 
 
 def report_button_error(exc: BaseException, source: str = "") -> None:
@@ -289,6 +358,7 @@ class FlatText(BorderBox):
         self.text.bind("<FocusOut>", lambda _e: self.set_border(T.BORDER))
         if not readonly:
             bind_touch_keyboard(self.text)
+        enable_touch_scroll(self.text)
 
     def set_text(self, content: str) -> None:
         self.text.configure(state="normal")
@@ -642,6 +712,12 @@ class ScrollArea(tk.Frame):
         self.canvas.unbind_all("<MouseWheel>")
 
     def _on_wheel(self, event) -> None:
+        # 指针在"自己会滚的东西"上时（表格 / 文本框 / 滚动条），滚它自己，
+        # 整页不要跟着一起动
+        if _scrollable_under(getattr(event, "widget", None)) is not None:
+            return
+        if _drag_blocked(getattr(event, "widget", None)):
+            return
         try:
             self.canvas.yview_scroll(int(-event.delta / 120), "units")
         except Exception:
@@ -706,6 +782,8 @@ class CheckTree(tk.Frame):
         self._keys = {}               # iid -> 业务 id
         if checkable:
             self.tree.bind("<Button-1>", self._on_click, add="+")
+        # 触屏：在表格里按住拖动 = 滑动表格内容（鼠标拖动仍然是划选多行）
+        enable_touch_scroll(self.tree)
         if on_double:
             self.tree.bind("<Double-1>", lambda _e: on_double())
         if on_menu:

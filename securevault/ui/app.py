@@ -354,15 +354,15 @@ class SecureVaultApp:
                 self._seed_demo()
                 self.start_service(show_panel=True)
                 return
-        if self.silent and self.keystore.auto_unlock():
+        if self.keystore.auto_unlock():
+            # 有 DPAPI 密钥副本：后台直接跑起来（面板仍然是关着的）
             if self.start_service(show_panel=False):
                 return
-        if self.silent:
-            # 静默启动但不具备自动解锁条件：只驻留托盘。
-            self._ui_locked = True
-            self.root.withdraw()
-            return
-        self.show_lock()
+        # 启动不弹密码窗口：只驻留托盘。要打开面板请点托盘图标
+        # （或者再双击一次 exe —— 单实例会把已有实例叫醒并弹出解锁窗口）。
+        self._ui_locked = True
+        self.root.withdraw()
+        return
 
     def _seed_demo(self) -> None:
         """评审模式用的演示数据（只写开发数据目录）。"""
@@ -1017,6 +1017,8 @@ class SecureVaultApp:
                 self.logger.close()
             except Exception:
                 pass
+        # 先把还在排队的定时任务停掉，再销毁窗口（否则会冒出 Tcl 后台错误）
+        self._stop_pending_timers()
         try:
             self.root.quit()
         except Exception:
@@ -1025,6 +1027,28 @@ class SecureVaultApp:
             self.root.destroy()
         except Exception:
             pass
+
+    def _stop_pending_timers(self) -> None:
+        """取消界面队列轮询与各页面的定时刷新。"""
+        pending = getattr(self, "_poll_after", None)
+        if pending is not None:
+            try:
+                self.root.after_cancel(pending)
+            except Exception:
+                pass
+            self._poll_after = None
+        for page in self._pages or []:
+            watch = getattr(page, "_watch_id", None)
+            if watch is None:
+                continue
+            try:
+                page.after_cancel(watch)
+            except Exception:
+                pass
+            try:
+                page._watch_id = None
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # 托盘回调（来自托盘线程 -> 必须回到界面线程）
@@ -1119,7 +1143,7 @@ class SecureVaultApp:
                 self._pages[0].refresh()
         except Exception:
             pass
-        self.root.after(1000, self._poll_queue)
+        self._poll_after = self.root.after(1000, self._poll_queue)
 
     # ------------------------------------------------------------------
     # 运行

@@ -194,9 +194,12 @@ def run_update_check(dirs) -> int:
             lines.append("[失败] %s（%s）%s" % (label, prefix or "直连", exc))
             continue
         lines.append("[成功] %s（%s）" % (label, prefix or "直连"))
+        at = update.version_tuple(info["latest"],)
+        now = update.version_tuple(APP_VERSION)
+        state = ("有新版本" if at > now else
+                 "比当前版本旧（可以回退）" if at < now else "已是最新")
         lines.append("        最新版本：%s（当前 %s，%s）"
-                     % (info["latest"], APP_VERSION,
-                        "有新版本" if info["newer"] else "已是最新"))
+                     % (info["latest"], APP_VERSION, state))
         lines.append("        下载地址：%s" % info["url"])
         lines.append("        文件大小：%s" % update.describe_size(info["size"]))
     lines.append("")

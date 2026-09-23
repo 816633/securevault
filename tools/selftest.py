@@ -607,7 +607,17 @@ def _test_update(runner: Runner) -> None:
                  update.build_url("global", SAMPLE_URL)
                  == "https://gh-proxy.org/" + SAMPLE_URL)
     runner.check("三个下载源都有名字", len(update.source_options()) == 3)
-    runner.check("默认下载源是加速源", update.DEFAULT_SOURCE != "github")
+    runner.check("默认线路是官方源（检查与下载都用它）",
+                 update.DEFAULT_SOURCE == "github"
+                 and update.CHECK_SOURCE == update.DEFAULT_SOURCE)
+    runner.check("自带 CA 证书包（系统证书库缺根证书时也能校验）",
+                 bool(update.ca_bundle_path()), update.ca_bundle_path())
+    runner.check("HTTPS 上下文可以创建", update.ssl_context() is not None)
+    runner.check("能认出证书类错误",
+                 update.is_ssl_error(__import__("ssl").SSLError("bad certificate")))
+    runner.check("只保留「本版主要改动」一段",
+                 update.changes_only("# x\n\n## 下载\n\n表\n\n## 本版主要改动\n\n- 改了\n\n## 别的\n\n- 不要")
+                 == "- 改了")
 
     work = tempfile.mkdtemp(prefix="sv-update-")
     try:
@@ -703,7 +713,19 @@ def _test_touch(runner: Runner) -> None:
                      touch.show_keyboard() is False and not calls)
         touch.set_enabled(True)
         os.environ["SV_TOUCH"] = "1"
+        os.environ["SV_TOUCH_CLICK"] = "0"
         touch._touch = None
+        runner.check("鼠标点击不算触摸点击（不弹键盘）",
+                     touch.last_input_is_touch() is False
+                     and touch.show_keyboard_for_touch() is False)
+        os.environ["SV_TOUCH_CLICK"] = "1"
+        calls.clear()
+        runner.check("触摸点击才算（弹键盘）",
+                     touch.last_input_is_touch() is True
+                     and touch.show_keyboard_for_touch() is True and bool(calls))
+        os.environ["SV_TOUCH"] = "1"
+        touch._touch = None
+        touch._last_launch = 0.0        # 清掉节流，才能马上再试一次
         launched = touch.show_keyboard()
         runner.check("触摸设备上会唤起屏幕键盘", launched is True and bool(calls),
                      "%s / %s" % (launched, calls))

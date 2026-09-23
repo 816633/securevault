@@ -69,7 +69,7 @@ def main() -> int:
         "page": update_mod.RELEASES_PAGE,
     }
     original = update_mod.check_for_update
-    update_mod.check_for_update = lambda source, timeout=30: info
+    update_mod.check_for_update = lambda source, timeout=30, insecure=False: info
     try:
         page.check_now()
         pump(app, 0.4)

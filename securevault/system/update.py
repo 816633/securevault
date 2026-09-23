@@ -24,6 +24,8 @@ import os
 import re
 import shutil
 import stat
+import ssl
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -48,6 +50,8 @@ SKIP_NAMES = {"请先读我.txt", "readme.txt", "readme.md", "license", "license
 SKIP_PREFIXES = ("securevaultdata", "__pycache__", ".git")
 #: 更新包里必须有这个文件，否则拒绝覆盖（避免用错包把程序覆盖坏）
 REQUIRED_FILE = "SecureVault.exe"
+#: 随程序分发的 CA 证书包（放在 assets 里）：系统证书库缺根证书时用它
+CA_BUNDLE_NAME = "cacert.pem"
 
 
 class UpdateError(Exception):
@@ -64,9 +68,10 @@ SOURCES = (
     ("v4", "gh-proxy.com（CloudFlare-优选-IPv4）（推荐）", "https://v4.gh-proxy.org/"),
     ("global", "gh-proxy.com（CloudFlare 全球）", "https://gh-proxy.org/"),
 )
-DEFAULT_SOURCE = "v4"
-#: 检查最新版本一律走官方源（下载时才有必要换加速源）
-CHECK_SOURCE = "github"
+#: 默认线路是官方源（检查与下载都用它，除非用户自己改）
+DEFAULT_SOURCE = "github"
+#: 兼容旧名字：检查最新版本默认也走官方源
+CHECK_SOURCE = DEFAULT_SOURCE
 
 #: 发布说明里「本版改动」那一段的标题关键字（用它把更新内容挑出来）
 CHANGE_HEADINGS = ("本版主要改动", "本版改动", "主要改动", "更新内容", "更新说明",
@@ -122,6 +127,71 @@ def is_newer(latest: str, current: str = APP_VERSION) -> bool:
     return version_tuple(latest) > version_tuple(current)
 
 
+# ---------------------------------------------------------------------------
+# HTTPS 证书
+# ---------------------------------------------------------------------------
+
+def ca_bundle_path() -> str:
+    """随程序分发的 CA 证书包路径（找不到返回空串）。"""
+    candidates = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(os.path.dirname(here))
+    candidates.append(os.path.join(root, "assets", CA_BUNDLE_NAME))
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        for base in (getattr(sys, "_MEIPASS", ""), exe_dir,
+                     os.path.join(exe_dir, "_internal")):
+            if base:
+                candidates.insert(0, os.path.join(base, "assets", CA_BUNDLE_NAME))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return ""
+
+
+def ssl_context(insecure: bool = False):
+    """返回 HTTPS 用的 SSLContext。
+
+    默认**优先用随程序分发的 CA 证书包**（`assets\\cacert.pem`）：有些电脑的系统
+    证书库缺根证书（或者从没更新过），直接用系统证书库会报 SSL 校验失败。
+    ``insecure=True`` 时不校验证书（只用于"证书问题的应急重查"，界面上会明确提示）。
+    """
+    if insecure:
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            return context
+        except Exception:
+            return None
+    bundle = ca_bundle_path()
+    if bundle:
+        try:
+            return ssl.create_default_context(cafile=bundle)
+        except Exception:
+            pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return None
+
+
+def is_ssl_error(exc: BaseException) -> bool:
+    """判断异常链里有没有证书 / TLS 相关错误。"""
+    seen = 0
+    node = exc
+    while node is not None and seen < 10:
+        if isinstance(node, ssl.SSLError):
+            return True
+        text = str(node).lower()
+        for key in ("certificate", "ssl", "tls"):
+            if key in text:
+                return True
+        node = getattr(node, "__cause__", None) or getattr(node, "reason", None)
+        seen += 1
+    return False
+
+
 def changes_only(text: str) -> str:
     """只取发布说明里「本版主要改动」这一段（没有这一段时返回空串）。"""
     lines = (text or "").splitlines()
@@ -153,13 +223,14 @@ def changes_only(text: str) -> str:
 # 检查更新
 # ---------------------------------------------------------------------------
 
-def check_for_update(source: str = DEFAULT_SOURCE, timeout: int = TIMEOUT) -> dict:
+def check_for_update(source: str = DEFAULT_SOURCE, timeout: int = TIMEOUT,
+                     insecure: bool = False) -> dict:
     """查最新发布；返回版本 / 更新说明 / 下载地址等信息（不下载）。
 
     出错时抛 :class:`UpdateError`，消息可以直接显示给用户。
     """
     url = build_url(source, API_URL)
-    data = _fetch_json(url, timeout)
+    data = _fetch_json(url, timeout, insecure=insecure)
     tag = str(data.get("tag_name") or data.get("name") or "").strip()
     latest = tag.lstrip("vV").strip() or APP_VERSION
     notes = str(data.get("body") or "").strip()
@@ -200,13 +271,14 @@ def _pick_asset(assets, latest: str):
     return "SecureVault-%s-win64-portable.zip" % latest, 0
 
 
-def _fetch_json(url: str, timeout: int = TIMEOUT) -> dict:
+def _fetch_json(url: str, timeout: int = TIMEOUT, insecure: bool = False) -> dict:
     request = urllib.request.Request(url, headers={
         "User-Agent": USER_AGENT,
         "Accept": "application/vnd.github+json",
     })
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout,
+                                    context=ssl_context(insecure)) as response:
             raw = response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
@@ -216,8 +288,19 @@ def _fetch_json(url: str, timeout: int = TIMEOUT) -> dict:
                               "稍后再试或换个下载源。" % exc.code)
         raise UpdateError("服务器返回错误：HTTP %s。" % exc.code)
     except urllib.error.URLError as exc:
+        if is_ssl_error(exc):
+            raise UpdateError(
+                "HTTPS 证书校验失败：%s\n"
+                "常见原因：电脑的系统时间不对（日期/时区），或者网络里有代理、"
+                "防火墙替换了证书。可以点「忽略证书校验重查一次」应急，"
+                "或者换一个线路再试。" % getattr(exc, "reason", exc))
         raise UpdateError("连接失败：%s。请检查网络，或换一个下载源再试。"
                           % getattr(exc, "reason", exc))
+    except ssl.SSLError as exc:
+        raise UpdateError(
+            "HTTPS 证书校验失败：%s\n常见原因：电脑的系统时间不对（日期/时区），"
+            "或者网络里有代理、防火墙替换了证书。可以点「忽略证书校验重查一次」应急，"
+            "或者换一个线路再试。" % exc)
     except Exception as exc:
         raise UpdateError("连接失败：%s" % exc)
     try:
@@ -234,6 +317,7 @@ def download(url: str, dest: str, progress=None, timeout: int = TIMEOUT) -> str:
     """把 ``url`` 下载到 ``dest``（先写 ``.part``，成功后改名）。
 
     ``progress(已下载字节, 总字节)`` 会被反复调用（总字节未知时为 0）。
+    下载一律做证书校验（不接受不安全的连接）。
     """
     folder = os.path.dirname(dest)
     if folder:
@@ -242,7 +326,8 @@ def download(url: str, dest: str, progress=None, timeout: int = TIMEOUT) -> str:
     done = False
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout,
+                                    context=ssl_context(False)) as response:
             total = int(response.headers.get("Content-Length") or 0)
             written = 0
             last = 0.0
@@ -261,6 +346,9 @@ def download(url: str, dest: str, progress=None, timeout: int = TIMEOUT) -> str:
     except urllib.error.HTTPError as exc:
         raise UpdateError("下载失败：HTTP %s。" % exc.code)
     except urllib.error.URLError as exc:
+        if is_ssl_error(exc):
+            raise UpdateError("下载失败：HTTPS 证书校验失败（%s）。"
+                              "可以换一个线路再试。" % getattr(exc, "reason", exc))
         raise UpdateError("下载失败：%s。可以换一个下载源再试。"
                           % getattr(exc, "reason", exc))
     except UpdateError:
